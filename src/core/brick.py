@@ -1,3 +1,4 @@
+from enum import auto
 import config as conf
 from .image import BaseImage
 from .utils import get_brick_position, dilate_and_group, clean_catalog
@@ -5,45 +6,61 @@ from .group import Group
 
 import logging
 import os
-from astropy.wcs import WCS
-from astropy.io import fits
 from astropy.nddata import Cutout2D
 import astropy.units as u
 import numpy as np
-from scipy.ndimage import zoom
+from typing import OrderedDict
+from pathos.pools import ProcessPool
+from copy import copy
 
 
 
 class Brick(BaseImage):
-    def __init__(self, brick_id=None, position=None, size=None) -> None:
-
-        # Housekeeping
-        self.brick_id = brick_id
-        self.bands = []
-        self.wcs = {}
-        self.pixel_scales = {}
-        self.data = {} 
-        self.headers = {}
-        self.properties = {}
-        self.catalogs = {}
-        self.type = 'brick'
-        self.n_sources = {}
-        self.group_ids = {}
-
-        # Load the logger
+    def __init__(self, brick_id=None, position=None, size=None, load=True) -> None:
+        
+        self.filename = f'B{brick_id}.h5'
         self.logger = logging.getLogger(f'farmer.brick_{brick_id}')
 
-        # Position
-        if (brick_id is not None) & ((position is not None) | (size is not None)):
-            raise RuntimeError('Cannot create brick from BOTH brick_id AND position/size!')
-        if brick_id is not None:
-            self.position, self.size = get_brick_position(brick_id)
+        if load:
+            self.logger.info(f'Trying to load brick from {self.filename}...')
+            attributes = self.read_hdf5()
+            for key in attributes:
+                self.__dict__[key] = attributes[key]
+                self.logger.debug(f'  ... {key}')
+        
         else:
-            self.position, self.size = position, size
-        self.buffsize = (self.size[0]+2*conf.BRICK_BUFFER, self.size[1]+2*conf.BRICK_BUFFER)
+
+            # Housekeeping
+            self.brick_id = brick_id
+            self.bands = []
+            self.wcs = {}
+            self.pixel_scales = {}
+            self.data = {} 
+            self.headers = {}
+            self.properties = {}
+            self.catalogs = {}
+            self.type = 'brick'
+            self.n_sources = {}
+            self.group_ids = {}
+            self.model_catalog = OrderedDict()
+            self.model_tracker = OrderedDict()
+            self.model_tracker_groups = OrderedDict()
+            self.catalog_band='detection'
+            self.catalog_imgtype='science'
+            
+
+            # Position
+            if (brick_id is not None) & ((position is not None) | (size is not None)):
+                raise RuntimeError('Cannot create brick from BOTH brick_id AND position/size!')
+            if brick_id is not None:
+                self.position, self.size = get_brick_position(brick_id)
+            else:
+                self.position, self.size = position, size
+            self.buffsize = (self.size[0]+2*conf.BRICK_BUFFER, self.size[1]+2*conf.BRICK_BUFFER)
+
         self.logger.info(f'Spawned brick #{self.brick_id} at ({self.position.ra:2.1f}, {self.position.dec:2.1f}) with size {self.size[0].to(u.arcmin):2.1f} X {self.size[1].to(u.arcmin):2.1f}')
 
-        self.filename = f'b{brick_id}_{self.position.ra.value:2.3f}_{self.position.dec.value:2.3f}.fits'
+
 
     def get_figprefix(self, imgtype, band):
         return f'B{self.brick_id}_{band}_{imgtype}'
@@ -60,7 +77,9 @@ class Brick(BaseImage):
         for band in self.bands:
             print(f' --- Data {band} ---')
             for imgtype in self.data[band].keys():
-                print(f'  {imgtype} ... {np.shape(self.data[band][imgtype].data)}')
+                img = self.data[band][imgtype].data
+                tsum, mean, med, std = np.nansum(img), np.nanmean(img), np.nanmedian(img), np.nanstd(img)
+                print(f'  {imgtype} ... {np.shape(img)} ( {tsum:2.2f} / {mean:2.2f} / {med:2.2f} / {std:2.2f})')
             # print(f'--- Properties {band} ---')
             for attr in self.properties[band].keys():
                 print(f'  {attr} ... {self.properties[band][attr]}')
@@ -86,7 +105,7 @@ class Brick(BaseImage):
 
         # Loop over provided data
         for imgtype in mosaic.data.keys():
-            if imgtype in ('science', 'weight', 'mask', 'segmap', 'groupmap', 'background', 'rms', 'model', 'residual'):
+            if imgtype in ('science', 'weight', 'mask', 'segmap', 'groupmap', 'background', 'rms', 'model', 'residual', 'chi'):
                 fill_value = np.nan
                 if imgtype == 'mask':
                     fill_value = True
@@ -137,51 +156,9 @@ class Brick(BaseImage):
         
         # TODO -- should be able to INHERET catalogs from the parent mosaic, if they exist!
 
-
-    def write(self, filename=None, directory=conf.PATH_BRICKS, allow_update=False):
-        if filename is None:
-            filename = self.filename
-        self.logger.debug(f'Writing to {filename}! (allow_update = {allow_update})')
-        if not filename.endswith('.fits'):
-            raise RuntimeError(f'Requested filename {filename} is not a recognized FITS file! (.fits)')
-        path = os.path.join(directory, filename)
-        if os.path.exists(path):
-            if not allow_update:
-                raise RuntimeError(f'Cannot update {filename}! (allow_update = False)')
-            else:
-                # open file and add to it
-                hdul = fits.open(path)
-        else:
-            # make new file
-            hdul = fits.HDUList()
-            hdul.append(fits.PrimaryHDU())
-
-        for band in self.data.keys():
-            for attr in self.data[band].keys():
-                if attr == 'psfmodel':
-                    continue
-                ext_name = f'{attr}_{band}'
-                try:
-                    hdul[ext_name]
-                except:
-                    hdul.append(fits.ImageHDU(name=ext_name))
-                hdul[ext_name].data = self.data[band][attr].data
-                # update WCS in header
-                for (key, value, comment) in self.headers[band][attr].cards:
-                    hdul[ext_name].header[key] = (value, comment)
-                for (key, value, comment) in self.data[band][attr].wcs.to_header().cards:
-                    hdul[ext_name].header[key] = (value, comment)
-                
-                self.logger.debug(f'... added {attr} for {band}')
-
-        try:
-            hdul.flush()
-            self.logger.info(f'Updated {filename}! (allow_update = {allow_update})')
-        except:
-            hdul.writeto(path, overwrite=conf.OVERWRITE)
-            self.logger.info(f'Wrote to {filename}! (allow_update = {allow_update})')
-
     def extract(self, band='detection', imgtype='science', background=None):
+        if self.properties[band]['subtract_background']:
+            background = self.get_background(band)
         catalog, segmap = self._extract(band, imgtype='science', background=background)
 
         # clean out buffer -- these are bricks!
@@ -195,12 +172,13 @@ class Brick(BaseImage):
         # save stuff
         self.catalogs[band][imgtype] = catalog
         self.data[band]['segmap'] = segmap
+        self.headers[band]['segmap'] = self.headers[band]['science']
         self.data[band]['weight'].data[mask] = 0 #removes buffer but keeps segment pixels
         self.data[band]['mask'].data[mask] = True # adds buffer to existing mask
         self.n_sources[band][imgtype] = len(catalog)
 
         # add ids
-        self.catalogs[band][imgtype].add_column(self.brick_id * np.ones(self.n_sources[band][imgtype]), name='brick_id', index=0)
+        self.catalogs[band][imgtype].add_column(self.brick_id * np.ones(self.n_sources[band][imgtype], dtype=np.int32), name='brick_id', index=0)
         self.catalogs[band][imgtype].add_column(1+np.arange(self.n_sources[band][imgtype]), name='ID', index=0)
 
         # add world positions
@@ -225,13 +203,26 @@ class Brick(BaseImage):
         self.catalogs[band][imgtype].add_column(group_pops, name='group_pop', index=3)
         self.data[band]['groupmap'] = Cutout2D(groupmap, self.position, self.buffsize[::-1], self.wcs[band], mode='partial', fill_value = 0)
         self.group_ids[band][imgtype] = np.unique(group_ids)
+        self.headers[band]['groupmap'] = self.headers[band]['science']
 
     def spawn_group(self, group_id=None, imgtype='science', bands=None):
         # Instantiate brick
+        self.logger.info(f'Spawning Group #{group_id} from Brick #{self.brick_id}...')
         group = Group(group_id, self, imgtype=imgtype)
         
         # Cut up science, weight, and mask, if available
         group.add_bands(self, bands=bands)
+        
+        nsrcs = group.n_sources['detection'][imgtype]
+        source_ids = np.array(group.get_catalog()['ID'])
+        self.logger.debug(f'Group #{group_id} has {nsrcs} source: {source_ids}')
+        if nsrcs > conf.GROUP_SIZE_LIMIT:
+            self.logger.warning(f'Group #{group_id} has {nsrcs} sources, but the limit is set to {conf.GROUP_SIZE_LIMIT}!')
+            group.rejected = True
+            return group
+
+        # transfer maps
+        group.transfer_maps()
 
         # Return it
         return group
@@ -244,6 +235,77 @@ class Brick(BaseImage):
         # grouping
         self.identify_groups(band=band, imgtype=imgtype)
 
+        if conf.PLOT > 1:
+            self.plot_image(imgtype='science')
+
         return self.catalogs[band][imgtype]
 
+    def process_groups(self, group_ids=None, imgtype='science', mode='all'):
+
+        if group_ids is None:
+            group_ids = self.group_ids['detection'][imgtype]
+        elif np.isscalar(group_ids):
+            group_ids = [group_ids,]
+
+        groups = (self.spawn_group(group_id) for group_id in group_ids)
+
+        # loop or parallel groups
+        if (conf.NCPUS == 0) | (len(group_ids) == 1):
+            for group in groups:
+
+                group = self.run_group(group, mode=mode)
+
+                # cleanup and hand back to brick
+                self.absorb(group)
+        else:
+            pool = ProcessPool(ncpus=conf.NCPUS)
+            groups = pool.imap(self.run_group, groups, **{'mode': mode})
+            [self.absorb(group) for group in groups]
+
+    def run_group(self, group, mode='all'):
+
+        if not group.rejected:
+        
+            if mode == 'all':
+                group.determine_models()
+                group.force_models()
+        
+            elif mode == 'models':
+                group.determine_models()
+
+            elif mode == 'photometry':
+                group.force_models()
+
+        return group
+
             
+    def absorb(self, group):
+
+        # check ownership
+        assert(self.brick_id == group.brick_id, 'Group does not belong to this brick!')
+
+        # # rebuild maps NOTE don't do this with cutouts. Realize it for the brick itself.
+        # for band in self.data:
+        #     if band == 'detection': # doesn't need new seg/group, and has no models
+        #         continue
+        #     for imgtype in group.data[band]:
+        #         if imgtype in ('model', 'residual', 'chi'):
+        #             (ymin, ymax), (xmin, xmax) = group.data[band][imgtype].bbox_original
+        #             (yminc, ymaxc), (xminc, xmaxc) = group.data[band][imgtype].bbox_cutout
+        #             if imgtype not in self.data[band].keys():
+        #                 self.data[band][imgtype] = copy(self.data[band]['science'])
+        #             self.data[band][imgtype].data[ymin:ymax, xmin:xmax] \
+        #                     += group.data[band][imgtype].data[yminc:ymaxc, xminc:xmaxc]
+
+        # model catalog
+        for source in group.model_catalog:
+            self.model_catalog[source] = group.model_catalog[source]
+
+        # model tracker
+        for source in group.model_tracker:
+            if source == 'group':
+                self.model_tracker_groups[group.group_id] = group.model_tracker[source]
+            else:
+                self.model_tracker[source] = group.model_tracker[source]
+
+        self.logger.debug(f'Group {group.group_id} has been absorbed')

@@ -1,24 +1,32 @@
+import enum
+from typing import OrderedDict
 import config as conf
 import os
 import logging
 
 import numpy as np
 from astropy.io import fits
+from astropy.table import Table
 from astropy.coordinates import SkyCoord
 from scipy.ndimage import label, binary_dilation, binary_erosion, binary_fill_holes
 import astropy.units as u
 from astropy.wcs import WCS
+from astropy.nddata import utils
+from astropy.nddata import Cutout2D
+from tractor.ellipses import EllipseESoft
 
 from tractor.psfex import PixelizedPsfEx, PixelizedPSF #PsfExModel
 # from tractor.psf import HybridPixelizedPSF
-from tractor.galaxy import ExpGalaxy
-from tractor import EllipseE
+from tractor.galaxy import ExpGalaxy, FracDev
+from tractor import PointSource, DevGalaxy, EllipseE, FixedCompositeGalaxy, Fluxes
 from astrometry.util.util import Tan
 from tractor import ConstantFitsWcs
 
 import time
 from reproject import reproject_interp
 from tqdm import tqdm
+import h5py
+from tractor.wcs import RaDecPos
 
 
 def start_logger():
@@ -62,16 +70,19 @@ def start_logger():
 
     return logger
 
-def read_wcs(wcs):
+def read_wcs(wcs, scl=1):
     t = Tan()
     crpix = wcs.wcs.crpix
     crval = wcs.wcs.crval
-    t.set_crpix(wcs.wcs.crpix[0], wcs.wcs.crpix[1])
+    t.set_crpix(wcs.wcs.crpix[0] * scl, wcs.wcs.crpix[1] * scl)
     t.set_crval(wcs.wcs.crval[0], wcs.wcs.crval[1])
-    cd = wcs.wcs.cd
+    try:
+        cd = wcs.wcs.cd / scl
+    except:
+        cd = wcs.wcs.pc / scl
     # assume your images have no rotation...
     t.set_cd(cd[0,0], cd[0,1], cd[1,0], cd[1,1])
-    t.set_imagesize(wcs.array_shape[0], wcs.array_shape[1])
+    t.set_imagesize(wcs.array_shape[0] * scl, wcs.array_shape[1] * scl)
     wcs = ConstantFitsWcs(t)
     return wcs
 
@@ -120,7 +131,7 @@ def clean_catalog(catalog, mask, segmap=None):
 
 
     pc = (np.sum(segmap==0) - zero_seg) / np.size(segmap)
-    logger.debug(f'Cleaned {np.sum(~keep)} sources ({pc*100:2.2f}% by area), {np.sum(keep)} remain. ({time.time()-tstart:2.2f}s)')
+    logger.info(f'Cleaned {np.sum(~keep)} sources ({pc*100:2.2f}% by area), {np.sum(keep)} remain. ({time.time()-tstart:2.2f}s)')
     if segmap is not None:
         return cleancat, segmap
     else:
@@ -150,20 +161,37 @@ def dilate_and_group(catalog, segmap, radius=0, fill_holes=False):
     x, y = np.round(catalog['x']).astype(int), np.round(catalog['y']).astype(int)
     group_ids = groupmap[y, x]
 
-    group_pops = -99 * np.ones(len(catalog))
+    group_pops = -99 * np.ones(len(catalog), dtype=int)
     for i, group_id in enumerate(group_ids):
         group_pops[i] =  np.sum(group_ids == group_id)  # np.unique with indices might be faster.
     
+    __, idx_first = np.unique(group_ids, return_index=True)
+    ugroup_pops, ngroup_pops = np.unique(group_pops[idx_first], return_counts=True)
+
     for i in np.arange(1, 5):
-        ngroup = np.sum(group_pops==i)
+        if np.sum(ugroup_pops == i) == 0:
+            ngroup = 0
+        else:
+            ngroup = ngroup_pops[ugroup_pops==i][0]
         pc = ngroup / n_groups
         logger.debug(f'... N  = {i}: {ngroup} ({pc*100:2.2f}%) ')
-    ngroup = np.sum(group_pops>=5)
+    ngroup = np.sum(ngroup_pops[ugroup_pops>=5])
     pc = ngroup / n_groups
     logger.debug(f'... N >= {5}: {ngroup} ({pc*100:2.2f}%) ')
 
     return group_ids, group_pops, groupmap
 
+def get_fwhm(img):
+    dx, dy = np.nonzero(img > np.nanmax(img)/2.)
+    try:
+        fwhm = np.mean([dx[-1] - dx[0], dy[-1] - dy[0]])
+    except:
+        fwhm = np.nan
+    return fwhm
+
+def get_resolution(img, sig=3):
+    fwhm = get_fwhm(img)
+    return np.pi * (sig / (2 * 2.5)* fwhm)**2
 
 def verify_psfmodel(band):
     logger = logging.getLogger('farmer.verify_psfmodel')
@@ -325,3 +353,346 @@ def reproject_discontinuous(input, out_wcs, out_shape, thresh=0.1):
 
     return outarray
     
+
+def recursively_save_dict_contents_to_group( h5file, dic, path='/'):
+
+    logger = logging.getLogger('farmer.hdf5')
+
+    # argument type checking
+    if not isinstance(dic, dict):
+        raise ValueError("must provide a dictionary")        
+
+    if not isinstance(path, str):
+        raise ValueError("path must be a string")
+    if not isinstance(h5file, h5py._hl.files.File):
+        raise ValueError("must be an open h5py file")
+    # save items to the hdf5 file
+    for key, item in dic.items():
+        logger.debug(f'  ... {path}{key} ({type(item)})')
+        key = str(key)
+        if key == 'logger':
+            continue
+        if path not in h5file.keys():
+            h5file.create_group(path)
+        if isinstance(item, (list, tuple)):
+            try:
+                item = np.array(item)
+            except:
+                item = np.array([i.to(u.deg).value for i in item])
+            #print(item)
+        # save strings, numpy.int64, and numpy.float64 types
+        if isinstance(item, (np.int32, np.int64, np.float64, str, np.float, float, np.float32, int)):
+            h5file[path].attrs[key]= item
+            # print(h5file[path+key].value)
+            # if not h5file[path + key][...] == item:
+            #     raise ValueError('The data representation in the HDF5 file does not match the original dict.')
+        # save numpy arrays
+        elif isinstance(item, (PointSource, SimpleGalaxy, ExpGalaxy, DevGalaxy, FixedCompositeGalaxy)):
+            model_params = dict(zip(item.getParamNames(), item.getParams()))
+            model_params['modeltype'] = item.name
+            recursively_save_dict_contents_to_group(h5file, model_params, path + key + '/')
+        elif isinstance(item, utils.Cutout2D):
+            recursively_save_dict_contents_to_group(h5file, item.__dict__, path + key + '/')
+        elif isinstance(item, SkyCoord):
+            h5file[path].attrs[key] = item.to_string()
+        elif isinstance(item, WCS):
+            h5file[path].attrs[key] = item.to_header_string()
+        elif isinstance(item, fits.header.Header):
+            h5file[path].attrs[key] = item.tostring()
+        elif isinstance(item, np.ndarray):
+            if (key == 'bands') & np.isscalar(item):
+                item = np.array(item).astype('|S9')
+                try:
+                    h5file[path].create_dataset(key, data=item)
+                except:
+                    if item[0] not in h5file[path][key][...]:
+                        values = h5file[path][key][...].tolist()
+                        values.append(item[0])
+                        print(values, type(values))
+                        item = np.array(values)
+                        del h5file[path][key]
+                        h5file[path].create_dataset(key, data=item)
+            else:
+                try:
+                    try:
+                        h5file[path].create_dataset(key, data=item)
+                    except:
+                        h5file[path][key][...] = item
+                except:
+                    try:
+                        item = np.array(item).astype('|S9')
+                        h5file[path].create_dataset(key, data=item)
+                    except:
+                        h5file[path][key][...] = item
+
+        elif isinstance(item, Table):
+            item.write(h5file.filename, path=path+key, append=True, overwrite=True)
+            # h5file[path].create_group(key)
+            # h5file[path][key].create_dataset('table', data=item.as_array())
+            # for unit, colname in zip(item.info['unit'], item.info['name']):
+            #     h5file[path][key].attrs[colname] = unit
+        # save dictionaries
+        elif isinstance(item, dict):
+            if len(item.keys()) == 0:
+                try:
+                    h5file[path][key]
+                except:
+                    h5file[path].create_group(key) # emtpy stuff
+            else:
+                recursively_save_dict_contents_to_group(h5file, item, path + key + '/')
+        # other types cannot be saved and will result in an error
+        else:
+            #print(item)
+            logger.warning('Cannot save %s type.' % type(item))
+
+def recursively_load_dict_contents_from_group(h5file, path='/', ans=None): 
+
+    logger = logging.getLogger('farmer.hdf5')
+
+    # return h5file[path]
+    if ans is None:
+        ans = {}
+    for key, item in h5file[path].items():
+        try:
+            key = int(key)
+        except:
+            pass
+        logger.debug(f'  ... {item.name} ({type(item)})')
+        if isinstance(item, h5py._hl.dataset.Dataset):
+            if item.shape is None:
+                ans[key] = {}
+            elif item[...].dtype == '|S9':
+                ans[key] = item[...].astype(str)
+            elif ('pixel_scales' in item.name) | (key in ('size', 'buffsize')):
+                dx, dy = item[...]
+                ans[key] = (dx*u.deg, dy*u.deg)
+            elif ('catalogs' in item.name):
+                ans[key] = Table.read(h5file.filename, item.name)
+                ans[key]['ra'].unit = u.deg
+                ans[key]['dec'].unit = u.deg
+            else:
+                ans[key] = item[...] 
+        elif isinstance(item, h5py._hl.group.Group):
+            ans[key] = {}
+            if key == 'model_catalog':
+                ans[key] = OrderedDict()
+            if ('data' in item.name) & (key in ('science', 'weight', 'mask', 'segmap', 'groupmap', 'background', 'rms', 'model', 'residual', 'chi')):
+                if 'data' in item.keys():
+                    awcs = WCS(fits.header.Header.fromstring(item.attrs['wcs']))
+                    ppix = item['input_position_cutout'][...]
+                    pos = awcs.pixel_to_world(ppix[0], ppix[1])
+                    ans[key] = Cutout2D(item['data'][...], pos, np.shape(item['data'][...]), wcs=awcs)
+                    logger.debug(f'  ...... building cutout')
+                    for key2 in item:
+                        logger.debug(f'          * {key2}')
+                        ans[key].__dict__[key2] = item[key2][...]
+                    for key2 in item.attrs.keys():
+                        logger.debug(f'          * {key2}')
+                        if key2 != 'wcs':
+                            ans[key].__dict__[key2] = item.attrs[key2]
+                else:
+                    ans[key] = item[...]
+
+            elif ('model' in item.name) & ('modeltype' in item.attrs):
+                modeltype = item.attrs['modeltype']
+                pos = RaDecPos(item.attrs['pos.ra'], item.attrs['pos.dec'])
+                fluxes = {}
+                for param in item.attrs:
+                    if param.startswith('brightness'):
+                        fluxes[param.split('.')[-1]] = item.attrs[param]
+                flux = Fluxes(**fluxes)
+    
+                if modeltype == 'PointSource':
+                    model = PointSource(pos, flux)
+                elif modeltype == 'SimpleGalaxy':
+                    model = SimpleGalaxy(pos, flux)
+                elif modeltype == 'ExpGalaxy':
+                    shape = EllipseESoft(item.attrs['shape.logre'], item.attrs['shape.ee1'], item.attrs['shape.ee2'])
+                    model = ExpGalaxy(pos, flux, shape)
+                elif modeltype == 'DevGalaxy':
+                    shape = EllipseESoft(item.attrs['shape.logre'], item.attrs['shape.ee1'], item.attrs['shape.ee2'])
+                    model = DevGalaxy(pos, flux, shape)
+                elif modeltype == 'FixedCompositeGalaxy':
+                    shape_exp = EllipseESoft(item.attrs['shapeExp.logre'], item.attrs['shapeExp.ee1'], item.attrs['shapeExp.ee2'])
+                    shape_dev = EllipseESoft(item.attrs['shapeDev.logre'], item.attrs['shapeDev.ee1'], item.attrs['shapeDev.ee2'])
+                    model = FixedCompositeGalaxy(pos, flux, FracDev(item.attrs['fracDev']), shape_exp, shape_dev)
+
+                ans[key] = model
+                
+            else:
+                ans[key] = recursively_load_dict_contents_from_group(h5file, path + str(key) + '/', ans[key])
+                for key2 in item.attrs:
+                    logger.debug(f'  ...... attribute: {key2}')
+                    value = item.attrs[key2]
+                    if 'headers' in item.name:
+                        ans[key][key2] = fits.header.Header.fromstring(value)
+                    elif 'wcs' in item.name:
+                        ans[key][key2] = WCS(fits.header.Header.fromstring(value))
+                    elif 'position' in item.name:
+                        ans[key][key2] = SkyCoord(value, unit=u.deg)
+                    else:
+                        ans[key][key2] = value
+    return ans   
+     
+def dcoord_to_offset(coord1, coord2, offset='arcsec', pixel_scale=None):
+    if offset == 'arcsec':
+        dra = (coord1.ra - coord2.ra).to(u.arcsec).value
+        ddec = (coord1.dec - coord2.dec).to(u.arcsec).value
+    elif offset == 'pixel':
+        dra = ((coord1.ra - coord2.ra) / pixel_scale[0]).value
+        ddec = ((coord1.dec - coord2.dec) / pixel_scale[1]).value
+    return -dra, ddec
+
+def cumulative(x):
+    x = x[~np.isnan(x)]
+    N = len(x)
+    return np.sort(x), np.array(np.linspace(0,N,N) )/float(N)
+
+def get_params(model):
+    source = OrderedDict()
+
+    if isinstance(model, PointSource):
+        name = 'PointSource'
+    else:
+        name = model.name
+    source['modeltype'] = name
+    source['_bands'] = np.array(list(model.getBrightness().getParamNames()))
+
+    # position
+    source['ra'] = model.pos[0] * u.deg
+    source['ra.err'] = np.sqrt(model.variance.pos[0]) * u.deg
+    source['dec'] = model.pos[1] * u.deg
+    source['dec.err'] = np.sqrt(model.variance.pos[1]) * u.deg
+
+    # total statistics
+    for stat in model.statistics:
+        if (stat not in source['_bands']) & (stat not in ('model', 'variance')):
+            source[f'total.{stat}'] = model.statistics[stat]
+
+    # shape
+    if isinstance(model, (ExpGalaxy, DevGalaxy)) & ~isinstance(model, SimpleGalaxy):
+        source['logre'] = model.shape.logre # log(arcsec)
+        source['logre.err'] = np.sqrt(model.variance.shape.logre)
+        source['ellip'] = model.shape.e
+        source['ellip.err'] = np.sqrt(model.variance.shape.e)
+        source['ee1'] = model.shape.ee1
+        source['ee1.err'] = np.sqrt(model.variance.shape.ee1)
+        source['ee2'] = model.shape.ee2
+        source['ee2.err'] = np.sqrt(model.variance.shape.ee2)
+
+        source['theta'] = np.rad2deg(model.shape.theta) * u.deg
+        source['theta.err'] = np.sqrt(np.rad2deg(model.variance.shape.theta)) * u.deg
+
+        source['reff'] = np.exp(model.shape.logre) * u.arcsec # in arcsec
+        source['reff.err'] = np.sqrt(model.variance.shape.logre) * source['reff']
+
+        source['ba'] = (1. - model.shape.e) / (model.shape.e + 1.)
+        source['ba.err'] = np.sqrt(model.variance.shape.e) * (2. / (1. + model.shape.e)**2)
+        
+        source['pa'] = 90. * u.deg + np.rad2deg(model.shape.theta) * u.deg
+        source['pa.err'] = np.rad2deg(model.variance.shape.theta) * u.deg
+
+    elif isinstance(model, FixedCompositeGalaxy):
+        source['softfracdev'] = model.fracDev.getValue()
+        source['fracdev'] = model.fracDev.clipped().getValue()
+        source['softfracdev.err'] = np.sqrt(model.variance.fracDev.getValue())
+        source['fracdev.err'] = np.sqrt(model.variance.fracDev.clippe().getValue())
+        for skind, shape, variance_shape in zip(('_exp', '_dev'), (model.shapeExp, model.shapeDev), (model.variance.shapeExp, model.variance.shapeDev)):
+            source[f'logre{skind}'] = shape.logre # log(arcsec)
+            source[f'logre{skind}.err'] = np.sqrt(variance_shape.logre)
+            source[f'ellip{skind}'] = shape.e
+            source[f'ellip{skind}.err'] = np.sqrt(variance_shape.e)
+            source[f'ee1{skind}'] = shape.ee1
+            source[f'ee1{skind}.err'] = np.sqrt(variance_shape.ee1)
+            source[f'ee2{skind}'] = shape.ee2
+            source[f'ee2{skind}.err'] = np.sqrt(variance_shape.ee2)
+
+            source[f'theta{skind}'] = np.rad2deg(shape.theta) * u.deg
+            source[f'theta{skind}.err'] = np.sqrt(np.rad2deg(variance_shape.theta)) * u.deg
+
+            source[f'reff{skind}'] = np.exp(shape.logre) * u.arcsec # in arcsec
+            source[f'reff{skind}.err'] = np.sqrt(variance_shape.logre) * source[f'reff{skind}'] # TODO IS THIS WRONG????
+
+            source[f'ba{skind}'] = (1. - shape.e) / (shape.e + 1.)
+            source[f'ba{skind}.err'] = np.sqrt(variance_shape.e) * (2. / (1. + shape.e)**2)
+            
+            source[f'pa{skind}'] = 90. * u.deg + np.rad2deg(shape.theta) * u.deg
+            source[f'pa{skind}.err'] = np.rad2deg(variance_shape.theta) * u.deg
+
+
+    for band in source['_bands']:
+
+        # photometry
+        source[f'{band}.flux'] = model.getBrightness().getFlux(band)
+        source[f'{band}.flux.err'] = np.sqrt(model.variance.getBrightness().getFlux(band))
+        
+        source[f'_{band}.zpt'] = conf.BANDS[band]['zeropoint']
+
+        source[f'{band}.flux.ujy'] = source[f'{band}.flux'] * 10**(-0.4 * (source[f'_{band}.zpt'] - 23.9)) * u.microjansky
+        source[f'{band}.flux.ujy.err'] = source[f'{band}.flux.err'] * 10**(-0.4 * (source[f'_{band}.zpt'] - 23.9)) * u.microjansky
+
+        source[f'{band}.mag'] = -2.5 * np.log10(source[f'{band}.flux']) * u.mag + source[f'_{band}.zpt'] * u.mag
+        source[f'{band}.mag.err'] = 2.5 * np.log10(np.e) / (source[f'{band}.flux'] / source[f'{band}.flux.err'])
+
+        # statistics
+        for stat in model.statistics[band]:
+            source[f'{band}.{stat}'] = model.statistics[band][stat]
+
+    return source
+
+def set_priors(model, priors):
+    logger = logging.getLogger('farmer.priors')
+
+    if priors is None:
+        logger.warning('I was asked to set priors but I have none!')
+        return model
+        
+    params = model.getNamedParams()
+    for name in params:
+        idx = params[name]
+        if name == 'pos':
+            if 'pos' in priors:
+                if priors['pos'] in ('fix', 'freeze'):
+                    model[idx].freezeAllParams()
+                    logger.debug('Froze position')
+                elif priors['pos'] is not None:
+                    sigma = priors['pos'].to(u.deg).value
+                    psigma = priors['pos'].to(u.arcsec)
+                    model[idx].addGaussianPrior('ra', mu=model[idx][0], sigma=sigma)
+                    model[idx].addGaussianPrior('dec', mu=model[idx][1], sigma=sigma)
+                    logger.debug(f'Set positon prior +/- {psigma}')
+                else:
+                    logger.debug('Position is free to vary')
+
+        elif name == 'fracDev':
+            if 'fracDev' in priors:
+                if priors['fracDev'] in ('fix', 'freeze'):
+                    model.freezeParam(idx)
+                    logger.debug(f'Froze {name}')
+                    # params = model[idx].getParamNames()
+                    # for i, param in enumerate(params):
+                    #     model[idx].freezeParam(i)
+                    #     logger.debug(f'Froze {param}')
+
+        elif name == 'shape':
+            if 'shape' in priors:
+                if priors['shape'] in ('fix', 'freeze'):
+                    params = model[idx].getParamNames()
+                    for i, param in enumerate(params):
+                        if i == 0: # leave reff alone
+                            continue
+                        model[idx].freezeParam(i)
+                        logger.debug(f'Froze {param}')
+
+            if 'reff' in priors:
+                if priors['reff'] in ('fix', 'freeze'):
+                    model[idx].freezeParam(0)
+                    logger.debug('Froze radius')
+                elif priors['reff'] is not None:
+                    sigma = np.log(priors['reff'].to(u.arcsec).value)
+                    psigma = priors['reff'].to(u.arcsec)
+                    model[idx].addGaussianPrior('logre', mu=model[idx][0], sigma=sigma)    
+                    print(f'Set radius prior +/- {psigma}')   
+                else:
+                    logger.debug('Radius is free to vary')             
+    return model

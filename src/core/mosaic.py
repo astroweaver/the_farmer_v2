@@ -24,6 +24,8 @@ class Mosaic(BaseImage):
         # Load the logger
         self.logger = logging.getLogger(f'farmer.mosaic_{band}')
 
+        self.filename = f'M{band}.h5'
+
         # Check data status
         if (band != 'detection') & (band not in conf.BANDS.keys()):
             self.logger.critical(f'{band} is not a configured band!')
@@ -94,12 +96,15 @@ class Mosaic(BaseImage):
             for attr in self.paths.keys():
                 self.data[attr] = fits.getdata(self.paths[attr])
                 self.headers[attr] = fits.getheader(self.paths[attr])
-            self.estimate_properties()
-            for band in conf.BANDS:
-                if 'backregion' in conf.BANDS[band].keys():
+                if attr in ('science', 'weight'):
+                    self.estimate_properties(band=band, imgtype=attr)
+            if band in conf.BANDS:
+                if 'backregion' in conf.BANDS[band]:
                     if conf.BANDS[band]['backregion'] == 'mosaic':
-                        self.estimate_background()
-                        break
+                        self.estimate_background(band=band, imgtype='science')
+            elif band == 'detection':
+                if conf.DETECTION['backregion'] == 'mosaic':
+                        self.estimate_background(band=band, imgtype='science')
             
 
     def get_bands(self):
@@ -118,9 +123,9 @@ class Mosaic(BaseImage):
     def spawn_brick(self, brick_id=None, position=None, size=None):
         # Instantiate brick
         if brick_id is None:
-            brick = Brick(position, size)
+            brick = Brick(position, size, load=False)
         else:
-            brick = Brick(brick_id)
+            brick = Brick(brick_id, load=False)
         
         # Cut up science, weight, and mask, if available
         brick.add_band(self)

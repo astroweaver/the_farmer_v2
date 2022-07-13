@@ -8,28 +8,26 @@ else: # You're working from a directory parallel with config?
     sys.path.insert(0, os.path.abspath(os.path.join(os.getcwd(), '../config')))
 
 # Miscellaneous science imports
-from astropy.io import fits, ascii
-from astropy.table import Table, Column, vstack, join
-from astropy.wcs import WCS
 import astropy.units as u
 import numpy as np
-from functools import partial
 import matplotlib.pyplot as plt
-import weakref
-from scipy import stats
-import pathos as pa
-from astropy.coordinates import SkyCoord
-import collections
 from tqdm import tqdm
+from pathos.pools import ProcessPool
+
 
 # Local imports
-# from .brick import Brick
-from .mosaic import Mosaic
-# from .group import Group
 try:
     import config as conf
 except:
     raise RuntimeError('Cannot find configuration file!')
+if 'name' not in conf.DETECTION:
+    conf.DETECTION['name'] = 'Detection'
+for band in conf.BANDS:
+    if 'name' not in conf.BANDS[band].keys():
+        conf.BANDS[band]['name'] = band.replace('_', ' ')
+from .mosaic import Mosaic
+from .brick import Brick
+
 
 # Make sure no interactive plotting is going on.
 plt.ioff()
@@ -61,7 +59,7 @@ T H E
 CONSOLE_LOGGING_LEVEL ..... {conf.CONSOLE_LOGGING_LEVEL}			
 LOGFILE_LOGGING_LEVEL ..... {conf.LOGFILE_LOGGING_LEVEL}												
 PLOT ...................... {conf.PLOT}																		
-NTHREADS .................. {conf.NTHREADS}																			
+NCPUS ..................... {conf.NCPUS}																			
 OVERWRITE ................. {conf.OVERWRITE} 
 """	
 )
@@ -113,7 +111,10 @@ def build_bricks(brick_ids=None, include_detection=True, bands=None, write=False
             except:
                 brick = mosaic.spawn_brick(brick_ids)
             del mosaic
-        if write: brick.write(allow_update=False)
+        if write: 
+            brick.write(allow_update=False, filetype='hdf5')
+        if conf.PLOT > 2:
+            brick.plot_image(show_catalog=False, show_groups=False)
         return brick
     else: # If brick_ids is none, then we're in production. Load in mosaics, make bricks, update files.
         for band in bands:
@@ -121,29 +122,69 @@ def build_bricks(brick_ids=None, include_detection=True, bands=None, write=False
             arr = brick_ids
             if conf.CONSOLE_LOGGING_LEVEL != 'DEBUG':
                 arr = tqdm(brick_ids)
-            logger.info('Spawning bricks...')
+            logger.info('Spawning or updating bricks...')
             for brick_id in arr:
-                brick = mosaic.spawn_brick(brick_id)
-                if write: brick.write(allow_update=True)
+                try:
+                    mosaic.add_to_brick(brick)
+                except:
+                    brick = mosaic.spawn_brick(brick_id)
+                brick.write(allow_update=True, filetype='hdf5')
+                if conf.PLOT > 2:
+                    brick.plot_image(show_catalog=False, show_groups=False)
             del mosaic
         return
 
-def detect_sources(brick_ids=None, band='detection', imgtype='science', mosaic=None, overwrite=False):
+def get_brick(brick_id):
+    return Brick(brick_id, load=True)
 
-    # TODO his background workflow is messy... 
-    # can we just force bricks to get the parent backgrounds at init if confiigured like that?
+def update_bricks(brick_ids=None, bands=None):
+    if bands is not None: # some kind of manual job
+        if np.isscalar(bands):
+            bands = [bands,]
+    else:
+        bands = list(conf.BANDS.keys())
+        
+    # get bricks with 'brick_ids' for 'bands'
+    if brick_ids is None:
+        n_bricks = conf.N_BRICKS[0] * conf.N_BRICKS[1]
+        brick_ids = 1 + np.arange(n_bricks)
 
-    # Deal with mosaic backgrounds first
-    background = None
-    if conf.DETECTION['subtract_background'] & (conf.DETECTION['backregion'] == 'mosaic'):
-        if mosaic is None:
-            mosaic = get_mosaic('detection')
-            sepback = mosaic.estimate_background()
-        else:
-            try:
-                sepback = mosaic.backgrounds[imgtype]
-            except:
-                sepback = mosaic.estimate_background()
+    # Update bricks where needed
+    
+    if np.isscalar(brick_ids): # single brick built in memory and saved
+        brick = get_brick(brick_ids)
+        for band in bands:
+            if band not in brick.bands:
+                logger.warning(f'{band} not found in brick #{brick_ids}! Updating...')
+                mosaic = get_mosaic(band, load=True)
+                mosaic.add_to_brick(brick)
+                del mosaic
+                brick.write(allow_update=False, filetype='hdf5')
+        if conf.PLOT > 2:
+            brick.plot_image(show_catalog=False, show_groups=False)
+        return brick
+
+    else: # If brick_ids is none, then we're in production. Load in mosaics, make bricks, update files.
+        for band in bands:
+            mosaic = get_mosaic(band, load=True)
+            arr = brick_ids
+            if conf.CONSOLE_LOGGING_LEVEL != 'DEBUG':
+                arr = tqdm(brick_ids)
+            logger.info('Spawning or updating bricks...')
+            for brick_id in arr:
+                brick = get_brick(brick_id)
+                for band in bands:
+                    if band not in brick.bands:
+                        logger.warning(f'{band} not found in brick #{brick_id}! Updating...')
+                        mosaic = get_mosaic(band, load=True)
+                        mosaic.add_to_brick(brick)
+                        del mosaic
+                        brick.write(allow_update=False, filetype='hdf5')
+                if conf.PLOT > 2:
+                    brick.plot_image(show_catalog=False, show_groups=False)
+            del mosaic
+
+def detect_sources(brick_ids=None, band='detection', imgtype='science', mosaic=None, write=False):
 
     # Generate brick_ids
     if brick_ids is None:
@@ -157,43 +198,20 @@ def detect_sources(brick_ids=None, band='detection', imgtype='science', mosaic=N
         
         # does the brick exist? load it.
         try:
-            brick = load_brick(brick_id)
+            brick = get_brick(brick_id)
         except:
             brick = build_bricks(brick_id,  bands='detection')
 
-        # deal with backgrounds on bricks
-        if conf.DETECTION['subtract_background']:
-            if conf.DETECTION['backregion'] == 'brick':
-                try:
-                    sepback = brick.backgrounds[band][imgtype]
-                except:
-                    sepback = brick.estimate_background(band=band)
-            
-            # Which kind?
-            if conf.DETECTION['backtype'] == 'flat':
-                background = sepback.globalback
-            elif conf.DETECTION['backtype'] == 'variable':
-                background = sepback.back()
-
-            # Make a cutout and inheret mosaic info
-            if conf.DETECTION['backregion'] == 'mosaic':
-                brick.data[band]['background'].data = sepback.back()[brick.data[band][imgtype].slices_original]
-                brick.data[band]['rms'].data = sepback.rms()[brick.data[band][imgtype].slices_original]
-                brick.properties[band][imgtype] = sepback.globalback
-                brick.properties[band][imgtype] = sepback.globalrms
-                if conf.DETECTION['backtype'] == 'variable':
-                    background = brick.data[band]['background'].data
-
         # detection
-        brick.extract(band=band, imgtype=imgtype, background=background)
+        brick.detect_sources(band=band, imgtype=imgtype)
 
-        # grouping
-        brick.identify_groups(band=band, imgtype=imgtype)
+        if write:
+            brick.write(allow_update=True)
 
-    if len(brick_ids) == 1:
         return brick
 
-def generate_models(brick_ids=None, bands=conf.MODEL_BANDS, imgtype='science'):
+
+def generate_models(brick_ids=None, group_ids=None, bands=conf.MODEL_BANDS, imgtype='science'):
     # get bricks with 'brick_ids' for 'bands'
     if brick_ids is None:
         n_bricks = conf.N_BRICKS[0] * conf.N_BRICKS[1]
@@ -205,7 +223,7 @@ def generate_models(brick_ids=None, bands=conf.MODEL_BANDS, imgtype='science'):
     for brick_id in brick_ids:
         # does the brick exist? load it.
         try:
-            brick = load_brick(brick_id)
+            brick = get_brick(brick_id)
         except:
             brick = build_bricks(brick_id,  bands=bands)
 
@@ -215,54 +233,80 @@ def generate_models(brick_ids=None, bands=conf.MODEL_BANDS, imgtype='science'):
         #TODO make sure background is dealt with
 
         # detect sources
-        brick.detect_sources()
+        if imgtype not in brick.catalogs['detection']:
+            brick.detect_sources()
+            if len(brick_ids) > 1:
+                brick.write_hdf5(allow_update=True)
 
-        # loop or parallel groups
-        for group_id in brick.group_ids['detection']:
+        # process the groups
+        brick.process_groups(group_ids=group_ids, imgtype=imgtype, mode='models')
 
-            # get group
-            group = brick.spawn_group(group_id)
+        # write brick
+        brick.write_hdf5(allow_update=True)
+        brick.write_catalog(allow_update=True)
 
-            # transfer maps
-            group.transfer_maps()
+        # ancillary stuff (e.g., residual brick)
+        brick.build_all_images()
+        brick.write_fits(allow_update=True)
 
-            # stage images and models
-            group.stage_engine()
+    if np.isscalar(brick_ids):
+        return brick
 
-            # optimize
-            group.optimize()
-
-            # run model DT
-
-            # ancillary stuff
-
-            # cleanup
-
-    pass
-
-def photometer(brick_ids=None, bands=None, imgtype='science'):
+def photometer(brick_ids=None, group_ids=None, bands=None, imgtype='science'):
     # get bricks with 'brick_ids' for 'bands'
+    if brick_ids is None:
+        n_bricks = conf.N_BRICKS[0] * conf.N_BRICKS[1]
+        brick_ids = 1 + np.arange(n_bricks)
 
-    # make sure background is dealt with
+    if np.isscalar(brick_ids):
+        brick_ids = [brick_ids,]
 
-    # check that model solutions exist
+    # Loop over bricks (or just one!)
+    for brick_id in brick_ids:
+        # does the brick exist? load it.
+        try:
+            brick = get_brick(brick_id)
+            update_bricks(brick_id, bands)
+        except:
+            brick = build_bricks(brick_id)
 
-    # stage images
+        # detect sources
+        if imgtype not in brick.catalogs['detection']:
+            brick.detect_sources()
+            if len(brick_ids) > 1:
+                brick.write_hdf5(allow_update=True)
 
-    # stage models
+        # if models aren't prepared, then determine them and run phot
+        if len(brick.model_catalog) == 0:        # TODO make this ironclad!     
+            brick.process_groups(group_ids=group_ids, imgtype=imgtype, mode='all')
+        else: # just run phot
+            brick.process_groups(group_ids=group_ids, imgtype=imgtype, mode='photometry')
 
-    # force models
+        # write brick
+        brick.write_hdf5(allow_update=True)
+        brick.write_catalog(allow_update=True)
 
-    # ancillary stuff
-
-    # cleanup
+        # ancillary stuff (e.g., residual brick)
+        brick.build_all_images()
+        brick.write_fits(allow_update=True)
     
-    pass
+    if np.isscalar(brick_ids):
+        return brick
 
+def quick_group(brick_id=1, group_id=524):
+    try:
+        brick = get_brick(brick_id)
+    except:
+        brick = build_bricks(brick_id)
+    brick.detect_sources()
+    group = brick.spawn_group(group_id)
+    group.determine_models()
+    group.force_models()
+    group.write_catalog(overwrite=True)
+    return group
 
 def rebuild_mosaic(brick_ids=None, bands=None, imgtype='science'):
-    pass
 
-def load_brick(brick_id=None, bands=None):
-    'find them and build them up'
+    # build a fresh mosaic...
+
     raise RuntimeError('Not implelented yet!')

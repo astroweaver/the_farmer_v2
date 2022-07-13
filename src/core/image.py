@@ -1,28 +1,37 @@
+from ast import Or
 from pickle import FALSE
+from pyexpat import model
 from re import L
+from tokenize import group
+from turtle import back
 from typing import OrderedDict
 import config as conf
-from .utils import clean_catalog, reproject_discontinuous, SimpleGalaxy, read_wcs
-from .group import Group
+from .utils import clean_catalog, get_fwhm, get_resolution, reproject_discontinuous, SimpleGalaxy, read_wcs, cumulative, set_priors
+from .utils import recursively_save_dict_contents_to_group, recursively_load_dict_contents_from_group, dcoord_to_offset, get_params
 
 import logging
 import os
 import sep
 import numpy as np
 import time
+import h5py
+import copy
 
+import matplotlib
 import matplotlib.pyplot as plt
-from  matplotlib.colors import LogNorm
-from mpl_toolkits.axes_grid1 import make_axes_locatable
+from  matplotlib.colors import LogNorm, SymLogNorm, Normalize, ListedColormap, BoundaryNorm
 from astropy.stats import sigma_clipped_stats
 from astropy.nddata import Cutout2D
-from astropy.io import ascii
-from astropy.table import Table
+from astropy.io import ascii, fits
+from astropy.table import Table, Column
 import astropy.units as u
 from astropy.coordinates import SkyCoord
-from matplotlib.patches import Rectangle
-from tractor import Catalog, RaDecPos, WcslibWcs
+from matplotlib.patches import Rectangle, Circle, Ellipse
+from tractor import RaDecPos
 from tqdm import tqdm
+from scipy import stats, ndimage
+import matplotlib.backends.backend_pdf
+
 
 from tractor import NCircularGaussianPSF, PixelizedPSF, PixelizedPsfEx, Image, Tractor, FluxesPhotoCal, NullWCS, ConstantSky, EllipseE, EllipseESoft, Fluxes, PixPos, Catalog
 from tractor.sersic import SersicIndex, SersicGalaxy
@@ -30,6 +39,7 @@ from tractor.sercore import SersicCoreGalaxy
 from tractor.galaxy import ExpGalaxy, DevGalaxy, FixedCompositeGalaxy, SoftenedFracDev
 from tractor.pointsource import PointSource
 from tractor.psf import HybridPixelizedPSF
+from tractor.constrained_optimizer import ConstrainedOptimizer
 
 
 class BaseImage():
@@ -44,18 +54,63 @@ class BaseImage():
         self.segments = {}
         self.catalogs = {}
         self.bands = []
+        self.model_catalog = OrderedDict()
+        self.model_tracker = OrderedDict()
+        self.priors = None
 
         # Load the logger
         self.logger = logging.getLogger(f'farmer.image')
 
+
+    def add_tracker(self, init_stage=0):
+        catalog = self.catalogs[self.catalog_band][self.catalog_imgtype]
+        if not hasattr(self, 'stage'):
+            self.stage = init_stage
+            self.solved = np.zeros(len(catalog), dtype=bool)
+        elif self.stage is None:
+            self.stage = init_stage
+            self.solved = np.zeros(len(catalog), dtype=bool)
+
+        if self.stage == 0:
+            self.logger.info(f'Tracking for Stage {self.stage}, {np.sum(self.solved)}/{len(self.solved)} models solved.')
+
+        if self.stage == init_stage:
+            self.model_tracker[self.type] = {}
+        self.model_tracker[self.type][self.stage] = {}
+
+        for src in catalog:
+            source_id = src['ID']
+            if source_id not in self.model_catalog:
+                self.model_catalog[source_id] = PointSource(None, None)  # this is a bit of a DT-dependent move...
+                self.model_tracker[source_id] = {}
+                self.source_ids = np.array(catalog['ID'])
+            self.model_tracker[source_id][self.stage] = {}
+
+    def reset_models(self):
+        self.engine = None
+        self.stage = None
+        self.model_tracker = OrderedDict()
+        self.model_catalog = OrderedDict()
    
     def get_image(self, imgtype=None, band=None):
 
         if self.type == 'mosaic':
-            return self.data[imgtype]
+            image = self.data[imgtype]
 
         else:
-            return self.data[band][imgtype].data
+            image = self.data[band][imgtype].data
+
+        # tsum, mean, med, std = np.nansum(image), np.nanmean(image), np.nanmedian(image), np.nanstd(image)
+        self.logger.debug(f'Getting {imgtype} image for {band}')# ( {tsum:2.2f} / {mean:2.2f} / {med:2.2f} / {std:2.2f} )')
+        return image
+
+    def get_psfmodel(self, band=None):
+
+        if self.type == 'mosaic':
+            return self.data['psfmodel']
+
+        else:
+            return self.data[band]['psfmodel']
 
     def set_image(self, image, imgtype=None, band=None):
         if self.type == 'mosaic':
@@ -67,6 +122,8 @@ class BaseImage():
             else:
                 self.data[band][imgtype] = Cutout2D(np.zeros_like(self.data[band]['science'].data), self.position, self.size, wcs=self.wcs[band])
                 self.data[band][imgtype].data = image
+
+        self.logger.debug(f'Setting {imgtype} image for {band} (sum = {np.nansum(image):2.5f})')
 
 
     def set_property(self, value, property, band=None):
@@ -91,9 +148,10 @@ class BaseImage():
             return self.wcs[band]
 
 
-    def estimate_background(self, band=None, imgtype='science'):
+    def estimate_background(self, image=None, band=None, imgtype='science'):
         
-        image = self.get_image(imgtype, band)
+        if image is None:
+            image = self.get_image(imgtype, band)
         if image.dtype.byteorder == '>':
                 image = image.byteswap().newbyteorder()
         self.logger.debug(f'Estimating background...')
@@ -149,7 +207,7 @@ class BaseImage():
                 deblend_nthresh=conf.DEBLEND_NTHRESH, deblend_cont=conf.DEBLEND_CONT)
         tstart = time.time()
         catalog, segmap = sep.extract(image-background, conf.THRESH, **kwargs)
-        self.logger.debug(f'Detection found {len(catalog)} sources. ({time.time()-tstart:2.2}s)')
+        self.logger.info(f'Detection found {len(catalog)} sources. ({time.time()-tstart:2.2}s)')
         catalog = Table(catalog)
 
         # Apply mask now?
@@ -225,9 +283,21 @@ class BaseImage():
         for band in bands:
             psfmodel = PixelizedPSF(self.data[band]['psfmodel'])
 
+            data = self.get_image(band=band, imgtype=data_imgtype)
+            data[np.isnan(data)] = 0
+            weight = self.get_image(band=band, imgtype='weight')
+            masked = self.get_image(band=band, imgtype='mask')
+            if self.type == 'group':
+                groupmap = self.get_image(band=band, imgtype='groupmap')
+                masked |= (groupmap != self.group_id)
+            weight[np.isnan(data) | masked] = 0
+
+            if np.sum(weight) == 0:
+                self.logger.warning(f'All weight pixels in {band} are zero! Check your data + masks!')
+
             self.images[band] = Image(
-                data=self.get_image(band=band, imgtype=data_imgtype),
-                invvar=self.get_image(band=band, imgtype='weight'),
+                data=data,
+                invvar=weight,
                 psf=psfmodel,
                 wcs=read_wcs(self.wcs[band]),
                 photocal=FluxesPhotoCal(band),
@@ -235,8 +305,50 @@ class BaseImage():
             )
             self.logger.debug(f'  ✓ {band}')
 
+    def update_models(self, bands=conf.BANDS, data_imgtype='science', existing_catalog=None):
+
+        if bands is None:
+            bands = self.get_bands()
+        elif np.isscalar(bands):
+            bands = [bands,]
+
+        if 'detection' in bands:
+            bands.remove('detection')
+
+        # Trackers
+        self.logger.debug(f'Staging models for group #{self.group_id}')
+
+        if existing_catalog is None:
+            existing_catalog = self.existing_model_catalog
+
+        for src in self.catalogs[self.catalog_band][self.catalog_imgtype]:
+
+            source_id = src['ID']
+
+            # add new bands using average (zpt-corr) fluxes as guesses
+            existing_bands = np.array(existing_catalog[source_id].brightness.getParamNames())
+            existing_fluxes = np.array(existing_catalog[source_id].brightness.getParams())
+            existing_zpt = np.array([conf.BANDS[band]['zeropoint'] for band in existing_bands])
+
+            fluxes = OrderedDict()
+            filler = {}
+            for band in bands:
+                if band not in existing_bands:
+                    zpt = conf.BANDS[band]['zeropoint']
+                    conv_fluxes = existing_fluxes * 10**(-0.4 * (existing_zpt - zpt))
+                    fluxes[band] = np.mean(conv_fluxes)
+                    filler[band] = 0
+                else:
+                    fluxes[band] = existing_fluxes[existing_bands==band][0]
+                    filler[band] = 0
+            self.model_catalog[source_id] = copy.deepcopy(self.existing_model_catalog[source_id])
+            self.model_catalog[source_id].brightness =  Fluxes(**fluxes, order=list(fluxes.keys()))
+            self.model_catalog[source_id].variance.brightness =  Fluxes(**filler, order=list(filler.keys()))
+
+            # update priors
+            self.model_catalog[source_id] = set_priors(self.model_catalog[source_id], self.priors)
     
-    def stage_models(self, bands=conf.MODEL_BANDS, data_imgtype='science', catalog_band='detection', catalog_imgtype='science'):
+    def stage_models(self, bands=conf.MODEL_BANDS, data_imgtype='science'):
         """ Build the Tractor Model catalog for the group """
 
         if bands is None:
@@ -248,21 +360,12 @@ class BaseImage():
             bands.remove('detection')
 
         # Trackers
-        self.logger.debug(f'Loading models for group #{self.group_id}')
-        self.model_catalog = OrderedDict()
+        self.logger.debug(f'Staging models for group #{self.group_id}')
 
-        for src in self.catalogs[catalog_band][catalog_imgtype]:
+        for src in self.catalogs[self.catalog_band][self.catalog_imgtype]:
 
             source_id = src['ID']
-            self.model_catalog[source_id] = PointSource(None, None)
-
-            self.logger.debug(f"Source #{source_id}")
-            self.logger.debug(f"  x, y: {src['x']:3.3f}, {src['y']:3.3f}")
-            self.logger.debug(f"  flux: {src['flux']:3.3f}")
-            self.logger.debug(f"  cflux: {src['cflux']:3.3f}")
-            self.logger.debug(f"  a, b: {src['a']:3.3f}, {src['b']:3.3f}") 
-            self.logger.debug(f"  theta: {src['theta']:3.3f}")
-
+                
             # inital position
             position = RaDecPos(src['ra'], src['dec'])
 
@@ -270,7 +373,7 @@ class BaseImage():
             qflux = np.zeros(len(bands))
             for j, band in enumerate(bands):
                 src_seg = self.data[band]['segmap'].data==source_id
-                qflux[j] = np.sum(self.images[band].data * src_seg)
+                qflux[j] = np.nansum(self.images[band].data * src_seg)
             flux = Fluxes(**dict(zip(bands, qflux)), order=bands)
 
             # initial shapes
@@ -280,23 +383,27 @@ class BaseImage():
             fluxcore = Fluxes(**dict(zip(bands, np.zeros(len(bands)))), order=bands) # Just a simple init condition
 
             if isinstance(self.model_catalog[source_id], PointSource):
-                self.model_catalog[source_id] = PointSource(position, flux)
-                self.model_catalog[source_id].name = 'PointSource' # HACK to get around Dustin's HACK.
+                model = PointSource(position, flux)
+                model.name = 'PointSource'
             elif isinstance(self.model_catalog[source_id], SimpleGalaxy):
-                self.model_catalog[source_id] = SimpleGalaxy(position, flux)
+                model = SimpleGalaxy(position, flux)
             elif isinstance(self.model_catalog[source_id], ExpGalaxy):
-                self.model_catalog[source_id] = ExpGalaxy(position, flux, shape)
+                model = ExpGalaxy(position, flux, shape)
             elif isinstance(self.model_catalog[source_id], DevGalaxy):
-                self.model_catalog[source_id] = DevGalaxy(position, flux, shape)
+                model = DevGalaxy(position, flux, shape)
             elif isinstance(self.model_catalog[source_id], FixedCompositeGalaxy):
-                self.model_catalog[source_id] = FixedCompositeGalaxy(
+                model = FixedCompositeGalaxy(
                                                 position, flux,
                                                 SoftenedFracDev(0.5),
                                                 shape, shape)
             elif isinstance(self.model_catalog[source_id], SersicGalaxy):
-                self.model_catalog[source_id] = SersicGalaxy(position, flux, shape, nre)
+                model = SersicGalaxy(position, flux, shape, nre)
             elif isinstance(self.model_catalog[source_id], SersicCoreGalaxy):
-                self.model_catalog[source_id] = SersicCoreGalaxy(position, flux, shape, nre, fluxcore)
+                model = SersicCoreGalaxy(position, flux, shape, nre, fluxcore)
+
+
+            model = set_priors(model, self.priors)
+            self.model_catalog[source_id] = model
 
             self.logger.debug(f'Source #{source_id}: {self.model_catalog[source_id].name} model at {position}')
             self.logger.debug(f'               {flux}') 
@@ -305,64 +412,599 @@ class BaseImage():
             if hasattr(self.model_catalog[source_id], 'shape'):
                 self.logger.debug(f'               {shape}')
 
+
     def optimize(self):
+        self.engine.optimizer = ConstrainedOptimizer()
+
+        cat = self.engine.getCatalog()
+
+        self.logger.info('Running engine...')
+        tstart = time.time()
         for i in range(conf.MAX_STEPS):
-            dlnp, X, alpha = self.engine.optimize()
-            print('dlnp', dlnp)
+
+            # try:
+            dlnp, X, alpha, var = self.engine.optimize(variance=True, damping=conf.DAMPING)
+            # except:
+            #     self.logger.warning(f'Optimization failed on step {i+1}!')
+            #     return False
+                
+            self.logger.debug(f'  dlnp: {dlnp:2.1f}')
             if dlnp < 1e-3:
                 break
 
-        return i, dlnp, X, alpha
+        self.variance = var
+        
+        self.logger.info(f'Fit converged in {i+1} steps ({time.time()-tstart:2.2f}s)')
+        for source_id in self.model_tracker:
+            self.model_tracker[source_id][self.stage]['nstep'] = i+1   # TODO should check this against MAX_STEP in a binary flag output...
+        
+        # return i, dlnp, X, alpha, var
+        return True
+
+    def store_models(self):
+        self.logger.debug(f'Storing models...')
+
+        cat = self.engine.getCatalog()
+        cat_variance = copy.deepcopy(cat)
+        cat_variance.setParams(self.variance)
+
+        for i, source_id in enumerate(self.source_ids):
+            model, variance = cat[i], cat_variance[i]
+            # To store stuff like chi2, bic, residual stats, group chi2
+            self.model_tracker[source_id][self.stage]['model'] = model
+            self.model_tracker[source_id][self.stage]['variance'] = variance
+
+            self.logger.debug(f'Source #{source_id}: {model.name} model at {model.pos}')
+            self.logger.debug(f'               {model.brightness}') 
+            self.logger.debug(f'               {variance.brightness}') 
+            if hasattr(model, 'fluxCore'):
+                self.logger.debug(f'               {model.fluxcore}')
+            if hasattr(model, 'shape'):
+                self.logger.debug(f'               {model.shape}')
+
+            if self.solved.all() | (self.stage == 11):
+                low_idx = 0
+                if self.stage == 11:
+                    low_idx = 10
+                self.model_catalog[source_id] = model
+                self.model_catalog[source_id].group_id = self.group_id
+                self.model_catalog[source_id].variance = variance
+                self.model_catalog[source_id].statistics = self.model_tracker[source_id][self.stage]
+                for stat in self.model_tracker[source_id][low_idx]:
+                    if stat in self.bands:
+                        for substat in self.model_tracker[source_id][low_idx][stat]:
+                            if substat.endswith('chisq'):
+                                self.model_catalog[source_id].statistics[stat][f'{substat}.nomodel'] = \
+                                                self.model_tracker[source_id][low_idx][stat][substat]
+                    elif substat.endswith('chisq'):
+                        self.model_catalog[source_id].statistics[f'{stat}.nomodel'] = \
+                                                    self.model_tracker[source_id][low_idx][stat]
 
     def stage_engine(self, bands=conf.MODEL_BANDS):
+        self.add_tracker()
         self.stage_images(bands=bands)
         self.stage_models(bands=bands)
         self.engine = Tractor(list(self.images.values()), list(self.model_catalog.values()))
         self.engine.bands = list(self.images.keys())
         self.engine.freezeParam('images')
 
-    def build_all_images(self, bands=None, overwrite=True):
-        if bands is None:
-            bands = self.engine.bands
-        elif np.isscalar(bands):
-            bands = [bands,]
+    def force_models(self, bands=conf.BANDS):
 
-        self.build_model_image(bands, overwrite)
-        self.build_residual_image(bands, overwrite)
-        self.build_chi_image(bands, overwrite)
+        self.logger.info('Measuring photometry...')
 
-    def build_model_image(self, bands=None, overwrite=True):
-        if bands is None:
-            bands = self.engine.bands
-        elif np.isscalar(bands):
-            bands = [bands,]
+        self.priors = conf.PHOT_PRIORS
+        self.existing_model_catalog = copy.deepcopy(self.model_catalog)
+        self.engine = None
+        self.stage = None
 
-        for band in bands:
-            model = self.engine.getModelImage(self.images[band])
-            self.set_image(model, 'model', band)
-            self.logger.debug(f'Built model image for {band}')
+        self.add_tracker(init_stage=10)
+        self.stage_images(bands=bands)
+        self.measure_stats(bands=bands, stage=self.stage)
+        if conf.PLOT > 2:
+            self.plot_image(tag=f's{self.stage}', band=bands, show_catalog=True, imgtype=('science', 'model', 'residual', 'chi'))
+
+        self.stage = 11
+        self.add_tracker()
+        self.update_models(bands=bands)
+        self.engine = Tractor(list(self.images.values()), list(self.model_catalog.values()))
+        self.engine.bands = list(self.images.keys())
+        self.engine.freezeParam('images')
+
+        self.optimize()
+        self.measure_stats(bands=bands, stage=self.stage) 
+        self.store_models()
+        if conf.PLOT > 2:
+                self.plot_image(band=bands, imgtype=('science', 'model', 'residual'))     
+        if conf.PLOT > 0:
+                self.plot_summary(bands=bands, source_id='group', tag='PHOT')
+
+
+    def determine_models(self, bands=conf.MODEL_BANDS):
+
+        self.logger.info('Determining best-choice models...')
+
+        # clean up
+        self.priors = conf.MODEL_PRIORS
+        self.reset_models()
+
+        # stage 0
+        self.add_tracker()
+        self.stage_images(bands=bands)
+        self.measure_stats(bands=bands, stage=self.stage)
+        if conf.PLOT > 2:
+            self.plot_image(tag=f's{self.stage}', band=bands, show_catalog=True, imgtype=('science', 'model', 'residual', 'chi'))
+
+        while not self.solved.all():
+            self.stage += 1
+            self.add_tracker()
+            self.stage_models(bands=bands)
         
-    def build_residual_image(self, bands=None, imgtype='science', overwrite=True):
+            self.engine = Tractor(list(self.images.values()), list(self.model_catalog.values()))
+            self.engine.bands = list(self.images.keys())
+            self.engine.freezeParam('images')
+
+            status = self.optimize()
+            if not status:
+                return
+            self.measure_stats(bands=bands, stage=self.stage)
+            self.store_models()
+            if conf.PLOT > 2:
+                self.plot_image(tag=f's{self.stage}', band=bands, show_catalog=True, imgtype=('science', 'model', 'residual', 'chi'))
+
+            self.decision_tree()    
+
+        # run final time
+        self.stage += 1
+        self.add_tracker()
+        self.stage_models(bands=bands)
+    
+        self.engine = Tractor(list(self.images.values()), list(self.model_catalog.values()))
+        self.engine.bands = list(self.images.keys())
+        self.engine.freezeParam('images')
+
+        status = self.optimize()
+        if not status:
+            return
+        self.measure_stats(bands=bands, stage=self.stage) 
+        self.store_models()
+        if conf.PLOT > 2:
+                self.plot_image(band=bands, imgtype=('science', 'model', 'residual'))     
+        if conf.PLOT > 1:
+                self.plot_summary(bands=bands, source_id='group', tag='MODEL')
+
+    def decision_tree(self):
+
+        self.logger.debug('Running Decision Tree...')
+        for i, source_id in enumerate(self.source_ids):
+
+            if not self.solved[self.source_ids == source_id]:       
+                # After stage 1, reset to SimpleGalaxies
+                if self.stage == 1:
+                    self.model_catalog[source_id] = SimpleGalaxy(None, None)
+                    self.logger.debug(f' Source #{source_id} ... trying SimpleGalaxy')
+
+                # After stage 2, compare PS(1) to SG(2)
+                if self.stage == 2:
+                    ps_chi2 = self.model_tracker[source_id][1]['rchisq']
+                    sg_chi2 = self.model_tracker[source_id][2]['rchisq']
+
+                    if (ps_chi2 > conf.SUFFICIENT_THRESH) & (sg_chi2 > conf.SUFFICIENT_THRESH): # neither win
+                        self.model_catalog[source_id] = ExpGalaxy(None, None, None)
+                        self.logger.debug(f' Source #{source_id} ... trying ExpGalaxy')
+                        continue
+
+                    delta_chi2 = ps_chi2 - (sg_chi2 + conf.SIMPLEGALAXY_PENALTY)
+                    if (delta_chi2 <= 0) & (ps_chi2 <= conf.SUFFICIENT_THRESH): # pointsource wins
+                        self.model_catalog[source_id] = PointSource(None, None)
+                        self.solved[i] = True
+                        self.logger.debug(f' Source #{source_id} ... solved as PointSource')
+                        continue
+
+                    # elif (sg_chi2 <= conf.SUFFICIENT_THRESH): # simplegalaxy wins outright
+                    #     self.model_catalog[source_id] = SimpleGalaxy(None, None, None)
+                    #     self.solved[i] = True
+                    #     self.logger.debug(f' Source #{source_id} ... solved as SimpleGalaxy')
+                    #     continue
+
+                    else: # Just continue
+                        self.model_catalog[source_id] = ExpGalaxy(None, None, None)
+                        self.logger.debug(f' Source #{source_id} ... trying ExpGalaxy')
+                        continue
+
+                # After stage 3, try DevGalaxy
+                if self.stage == 3:
+                    self.model_catalog[source_id] = DevGalaxy(None, None, None)
+                    self.logger.debug(f' Source #{source_id} ... trying DevGalaxy')
+                    continue
+
+                # After stage 4, compare EXP(3) to DEV(4)
+                if self.stage == 4:
+                    ps_chi2 = self.model_tracker[source_id][1]['rchisq']
+                    sg_chi2 = self.model_tracker[source_id][2]['rchisq']
+                    exp_chi2 = self.model_tracker[source_id][3]['rchisq']
+                    dev_chi2 = self.model_tracker[source_id][4]['rchisq']
+
+                    if (exp_chi2 > conf.SUFFICIENT_THRESH) & (dev_chi2 > conf.SUFFICIENT_THRESH): # neither win
+                        self.model_catalog[source_id] = FixedCompositeGalaxy(None, None, None, None, None)
+                        self.logger.debug(f' Source #{source_id} ... trying CompostieGalaxy')
+                        continue
+
+                    elif (sg_chi2 <= exp_chi2) & (sg_chi2 <= dev_chi2) & (sg_chi2 <= conf.SUFFICIENT_THRESH): # sg is better, go back
+                        self.model_catalog[source_id] = SimpleGalaxy(None, None, None)
+                        self.solved[i] = True
+                        self.logger.debug(f' Source #{source_id} ... solved as SimpleGalaxy')
+                        continue
+
+                    elif abs(exp_chi2 - dev_chi2) < conf.EXP_DEV_SIMILAR_THRESH: # if exp and dev are similar
+                        self.model_catalog[source_id] = FixedCompositeGalaxy(None, None, None, None, None)
+                        self.logger.debug(f' Source #{source_id} ... trying CompostieGalaxy')
+                        continue
+
+                    elif (exp_chi2 < dev_chi2) & (exp_chi2 <= conf.SUFFICIENT_THRESH): # exp is just bettter and wins
+                        self.model_catalog[source_id] = ExpGalaxy(None, None, None)
+                        self.solved[i] = True
+                        self.logger.debug(f' Source #{source_id} ... solved as ExpGalaxy')
+                        continue
+
+                    elif (dev_chi2 < exp_chi2) & (dev_chi2 <= conf.SUFFICIENT_THRESH): # dev is just better and wins
+                        self.model_catalog[source_id] = DevGalaxy(None, None, None)
+                        self.solved[i] = True
+                        self.logger.debug(f' Source #{source_id} ... solved as DevGalaxy')
+                        continue
+
+                # After stage 5, check exp and dev
+                if self.stage == 5:
+                    exp_chi2 = self.model_tracker[source_id][3]['rchisq']
+                    dev_chi2 = self.model_tracker[source_id][4]['rchisq']
+                    comp_chi2 = self.model_tracker[source_id][5]['rchisq']
+
+                    if (exp_chi2 <= comp_chi2) & (exp_chi2 <= conf.SUFFICIENT_THRESH): # exp wins
+                        self.model_catalog[source_id] = ExpGalaxy(None, None, None)
+                        self.solved[i] = True
+                        self.logger.debug(f' Source #{source_id} ... solved as ExpGalaxy')
+                        continue
+
+                    elif (dev_chi2 <= comp_chi2) & (dev_chi2 <= conf.SUFFICIENT_THRESH): # dev wins
+                        self.model_catalog[source_id] = DevGalaxy(None, None, None)
+                        self.solved[i] = True
+                        self.logger.debug(f' Source #{source_id} ... solved as DevGalaxy')
+                        continue
+
+                    elif (comp_chi2 <= conf.SUFFICIENT_THRESH): # comp wins
+                        self.model_catalog[source_id] = FixedCompositeGalaxy(None, None, None, None, None)
+                        self.solved[i] = True
+                        self.logger.debug(f' Source #{source_id} ... solved as CompositeGalaxy')
+                        continue
+
+                    else: # wow that thing is crap. Pick the lowest chi2
+                        ps_chi2 = self.model_tracker[source_id][1]['rchisq']
+                        sg_chi2 = self.model_tracker[source_id][2]['rchisq']
+                        chi2 = np.array([ps_chi2, sg_chi2, exp_chi2, dev_chi2, comp_chi2])
+
+                        if np.argmin(chi2) == 0:
+                            self.model_catalog[source_id] = PointSource(None, None)
+                            self.solved[i] = True
+                            self.logger.debug(f' Source #{source_id} ... solved as PointSource')
+                            continue
+
+                        if np.argmin(chi2) == 1:
+                            self.model_catalog[source_id] = SimpleGalaxy(None, None)
+                            self.solved[i] = True
+                            self.logger.debug(f' Source #{source_id} ... solved as SimpleGalaxy')
+                            continue
+
+                        if np.argmin(chi2) == 2:
+                            self.model_catalog[source_id] = ExpGalaxy(None, None, None)
+                            self.solved[i] = True
+                            self.logger.debug(f' Source #{source_id} ... solved as ExpGalaxy')
+                            continue
+
+                        if np.argmin(chi2) == 3:
+                            self.model_catalog[source_id] = DevGalaxy(None, None, None)
+                            self.solved[i] = True
+                            self.logger.debug(f' Source #{source_id} ... solved as DevGalaxy')
+                            continue
+
+                        if np.argmin(chi2) == 4:
+                            self.model_catalog[source_id] = PointSource(None, None, None, None, None)
+                            self.solved[i] = True
+                            self.logger.debug(f' Source #{source_id} ... solved as CompositeGalaxy')
+                            continue
+
+                        self.logger.warning(f' Source #{source_id} did not meet Chi2 requirements! ({np.argmin(chi2):2.2f} > {conf.SUFFICIENT_THRESH}:2.2f)')
+
+
+    def measure_stats(self, bands=None, stage=None):
         if bands is None:
             bands = self.engine.bands
         elif np.isscalar(bands):
             bands = [bands,]
 
+        if stage is None:
+            try:
+                stage = self.stage
+            except:
+                pass
+
+        self.build_all_images(bands=bands)
+
+        q_pc = (5, 16, 50, 84, 95)
+
+        self.logger.debug('Measuing statistics...')
+        # group Chi2, <Chi>, sig(Chi)
+        if self.type == 'group':
+            self.logger.info(f'{self.type} #{self.group_id}')
+            ntotal_pix = 0
+            ntotalres_elem = 0
+            totchi = []
+            rchi2_model_top = []
+            rchi2_model_bot = []
+            for band in bands:
+                groupmap = self.get_image('groupmap', band)
+                segmap = self.get_image('segmap', band)
+                chi = self.get_image('chi', band=band)[groupmap==self.group_id].flatten()
+                print('Foooooooooo', band, np.sum(chi.flatten()))
+                totchi += list(chi)
+                chi2, chi_pc = np.sum(chi**2), np.nanpercentile(chi, q=q_pc)
+                if np.isscalar(chi_pc):
+                    chi_pc = np.nan * np.ones(5)
+                area = 0
+                for source_id in self.catalogs[self.catalog_band][self.catalog_imgtype]['ID']:
+                    data = self.images[band].data.copy()
+                    data[(self.images[band].invvar <= 0) | (segmap != source_id)] = 0
+                    area += get_fwhm(data)**2
+                nres_elem = area / (get_fwhm(self.images[band].psf.img))**2
+                ndata = np.sum(groupmap==self.group_id)
+                try:
+                    nparam = self.engine.getCatalog().numberOfParams() - np.sum(np.array(bands)!=band)  
+                    model_bands = self.engine.bands
+                    src_model = self.engine.getModelImage(model_bands == band)
+                    chi_model = self.engine.getChiImage(model_bands == band)
+                    rchi2_model = np.sum(chi_model**2 * src_model) / np.sum(src_model)
+                    rchi2_model_top.append(np.sum(chi_model**2 * src_model))
+                    rchi2_model_bot.append(np.sum(src_model))
+                except:
+                    nparam = 0
+                    rchi2_model = np.nan
+                    rchi2_model_top = np.nan
+                    rchi2_model_bot = np.nan
+                ndof = np.max([1, ndata - nparam])
+                rchi2 = chi2 / ndof
+                
+                # dustin's rchi2
+                
+
+                self.logger.info(f'   {band}: 𝛘2/N = {rchi2:2.2f} ({rchi2_model:2.2f}) | N(data) = {ndata:2.2f} ({nres_elem:2.2f}) | N(param) = {nparam:2.0f} | N(DOF) = {ndof:2.2f} | Med(𝛘) = {chi_pc[2]:2.2f} | Width(𝛘) = {chi_pc[3]-chi_pc[1]:2.2f}')
+                
+                ntotal_pix += ndata 
+                ntotalres_elem += nres_elem
+                if stage is not None:
+                    self.model_tracker[self.type][stage][band] = {}
+                    self.model_tracker[self.type][stage][band]['chisq'] = chi2
+                    self.model_tracker[self.type][stage][band]['rchisq'] = chi2 /ndof
+                    self.model_tracker[self.type][stage][band]['rchisqmodel'] = rchi2_model
+                    for pc, chi_npc in zip(q_pc, chi_pc):
+                        self.model_tracker[self.type][stage][band][f'chi_pc{pc}'] = chi_npc
+                    if len(chi) >= 8:
+                        self.model_tracker[self.type][stage][band]['chi_k2'] = stats.normaltest(chi)[0]
+                    else:
+                        self.model_tracker[self.type][stage][band]['chi_k2'] = np.nan
+                    self.model_tracker[self.type][stage][band]['ndata'] = ndata
+                    self.model_tracker[self.type][stage][band]['nparam'] = nparam
+                    self.model_tracker[self.type][stage][band]['ndof'] = ndof
+                    self.model_tracker[self.type][stage][band]['nres'] = nres_elem
+            try:
+                nparam = self.engine.getCatalog().numberOfParams()
+            except:
+                nparam = 0
+            ndof = np.max([len(bands), ntotal_pix - nparam])
+            chi2 = np.sum(np.array([self.model_tracker[self.type][stage][band]['chisq'] for band in bands]))
+            self.model_tracker[self.type][stage]['chisq'] = chi2
+            tot_rchi2_model = np.sum(rchi2_model_top) / np.sum(rchi2_model_bot)
+            self.model_tracker[self.type][stage]['rchisqmodel'] = tot_rchi2_model
+            self.model_tracker[self.type][stage]['rchisq'] = chi2 / ndof
+            for pc, chi_npc in zip(q_pc, np.nanpercentile(totchi, q=q_pc)):
+                self.model_tracker[self.type][stage][f'chi_pc{pc}'] = chi_npc
+            if len(totchi) >= 8:
+                self.model_tracker[self.type][stage]['chi_k2'] = stats.normaltest(totchi)[0]
+            else:
+                self.model_tracker[self.type][stage]['chi_k2'] = np.nan
+            self.model_tracker[self.type][stage]['ndata'] = ntotal_pix
+            self.model_tracker[self.type][stage]['nparam'] = nparam
+            self.model_tracker[self.type][stage]['ndof'] = ndof
+            self.model_tracker[self.type][stage]['nres'] = ntotalres_elem
+            self.logger.info(f'   ==> 𝛘2/N = {chi2/ndof:2.2f} ({tot_rchi2_model:2.2f}) | N(data) = {ntotal_pix:2.2f} ({ntotalres_elem:2.2f}) | N(param) = {nparam:2.0f} | N(DOF) = {ndof:2.2f}')
+
+        for i, src in enumerate(self.catalogs[self.catalog_band][self.catalog_imgtype]):
+            source_id = src['ID']
+            model = self.model_catalog[source_id]
+            try:
+                modelname = model.name
+            except:
+                modelname = 'PointSource'
+            if self.stage == 0:
+                modelname = 'None'
+            issolved = ''
+            if self.solved[i]:
+                issolved = ' - SOLVED'
+            self.logger.info(f'Source #{source_id} ({modelname}{issolved})')
+            ntotal_pix = 0
+            ntotalres_elem = 0
+            totchi = []
+            rchi2_model_top = []
+            rchi2_model_bot = []
+            for band in bands:
+                segmap = self.get_image('segmap', band)
+                chi = self.get_image('chi', band=band)[segmap==source_id].flatten()
+                totchi += list(chi)
+                chi2, chi_pc = np.nansum(chi**2), np.nanpercentile(chi, q=(5, 16, 50, 84, 95))
+                if np.isscalar(chi_pc):
+                    chi_pc = np.nan * np.ones(5)
+                
+                data = self.images[band].data.copy()
+                data[(self.images[band].invvar <= 0) | (segmap != source_id)] = 0
+                ndata = np.nansum(segmap == source_id).astype(np.int32)
+                nres_elem = (get_fwhm(data) / get_fwhm(self.images[band].psf.img))**2
+                try:
+                    nparam = self.model_catalog[source_id].numberOfParams() - np.nansum(np.array(bands)!=band).astype(np.int32)
+                    tr = Tractor([self.images[band],], Catalog(*[model,]))
+                    src_model = tr.getModelImage(0)
+                    chi_model = tr.getChiImage(0)
+                    rchi2_model = np.nansum(chi_model**2 * src_model) / np.nansum(src_model)
+                    rchi2_model_top.append(np.nansum(chi_model**2 * src_model))
+                    rchi2_model_bot.append(np.nansum(src_model))
+                except:
+                    nparam = 0
+                    rchi2_model = np.nan
+                    rchi2_model_top = np.nan
+                    rchi2_model_bot = np.nan
+                ndof = np.max([1, ndata - nparam]).astype(np.int32)
+                rchi2 = chi2 / ndof
+                
+                # dustin's rchi2
+                
+
+                self.logger.info(f'   {band}: 𝛘2/N = {rchi2:2.2f} ({rchi2_model:2.2f}) | N(data) = {ndata:2.2f} ({nres_elem:2.2f}) | N(param) = {nparam:2.0f} | N(DOF) = {ndof:2.2f} | Med(𝛘) = {chi_pc[2]:2.2f} | Width(𝛘) = {chi_pc[3]-chi_pc[1]:2.2f}')
+                
+                ntotal_pix += ndata
+                ntotalres_elem += nres_elem
+                if stage is not None:
+                    self.model_tracker[source_id][stage][band] = {}
+                    self.model_tracker[source_id][stage][band]['rchisq'] = chi2 / ndof
+                    self.model_tracker[source_id][stage][band]['rchisqmodel'] = rchi2_model
+                    self.model_tracker[source_id][stage][band]['chisq'] = chi2
+                    for pc, chi_npc in zip(q_pc, chi_pc):
+                        self.model_tracker[source_id][stage][band][f'chi_pc{pc}'] = chi_npc
+                    if len(chi) >= 8:
+                        self.model_tracker[source_id][stage][band]['chi_k2'] = stats.normaltest(chi)[0]
+                    else:
+                        self.model_tracker[source_id][stage][band]['chi_k2'] = np.nan
+                    self.model_tracker[source_id][stage][band]['ndata'] = ndata
+                    self.model_tracker[source_id][stage][band]['nparam'] = nparam
+                    self.model_tracker[source_id][stage][band]['ndof'] = ndof
+                    self.model_tracker[source_id][stage][band]['nres'] = nres_elem
+            try:
+                nparam = self.model_catalog[source_id].numberOfParams().astype(np.int32)
+            except:
+                nparam = 0
+            ndof = np.max([len(bands), ntotal_pix - nparam]).astype(np.int32)
+            chi2 = np.sum(np.array([self.model_tracker[source_id][stage][band]['chisq'] for band in bands]))
+            self.model_tracker[source_id][stage]['rchisq'] = chi2 / ndof
+            tot_rchi2_model = np.sum(rchi2_model_top) / np.sum(rchi2_model_bot)
+            self.model_tracker[source_id][stage]['rchisqmodel'] = tot_rchi2_model
+            self.model_tracker[source_id][stage]['chisq'] = chi2
+            for pc, chi_npc in zip(q_pc, np.nanpercentile(totchi, q=(5, 16, 50, 84, 95))):
+                self.model_tracker[source_id][stage][f'chi_pc{pc}'] = chi_npc
+            if len(totchi) >= 8:
+                self.model_tracker[source_id][stage]['chi_k2'] = stats.normaltest(totchi)[0]
+            else:
+                self.model_tracker[source_id][stage]['chi_k2'] = np.nan
+            self.model_tracker[source_id][stage]['ndata'] = ntotal_pix
+            self.model_tracker[source_id][stage]['nparam'] = nparam
+            self.model_tracker[source_id][stage]['ndof'] = ndof
+            self.model_tracker[source_id][stage]['nres'] = ntotalres_elem
+            self.logger.info(f'   ==> 𝛘2/N = {chi2/ndof:2.2f} ({tot_rchi2_model:2.2f}) | N(data) = {ntotal_pix:2.2f} ({ntotalres_elem:2.2f}) | N(param) = {nparam:2.0f} | N(DOF) = {ndof:2.2f}')
+
+    def build_all_images(self, bands=None, source_id=None, overwrite=True):
+        if bands is None:
+            bands = self.engine.bands
+        elif np.isscalar(bands):
+            bands = [bands,]
+
+        self.build_model_image(bands, source_id, overwrite)
+        self.build_residual_image(bands, source_id, overwrite)
+        self.build_chi_image(bands, source_id, overwrite)
+
+    def build_model_image(self, bands=None, source_id=None, overwrite=True):
+        if bands is None:
+            bands = self.engine.bands
+        elif np.isscalar(bands):
+            bands = [bands,]
+        models = {}
+
+        srcs = []
+        if source_id is not None:
+            if np.isscalar(source_id):
+                srcs.append(self.model_catalog[source_id])
+            else:
+                for sid in source_id:
+                    srcs.append(self.model_catalog[sid])
+        else:
+            srcs = self.model_catalog.values()
+
         for band in bands:
-            model = self.get_image('model', band)
-            self.set_image(self.get_image('science', band) - model, 'residual', band)
+            if hasattr(self, 'engine') & (self.engine is not None):
+                if source_id is not None:
+                    model = Tractor([self.images[band],], Catalog(*srcs)).getModelImage(0)
+                else:
+                    model = self.engine.getModelImage(self.images[band])
+                    self.set_image(model, 'model', band)
+            else:
+                model = np.zeros_like(self.images[band].data)
+                if source_id is None:
+                    self.set_image(model, 'model', band)
+
+            self.logger.debug(f'Built model image for {band}')
+            if len(bands) == 1:
+                return model
+            else:
+                models[band] = model
+
+        return models
+        
+    def build_residual_image(self, bands=None, source_id=None, imgtype='science', overwrite=True):
+        if bands is None:
+            bands = self.engine.bands
+        elif np.isscalar(bands):
+            bands = [bands,]
+        residuals = {}
+
+        for band in bands:
+            if source_id is not None:
+                model = self.build_model_image(band, source_id, overwrite)
+                residual = self.get_image('science', band) - model
+            else:
+                model = self.get_image('model', band)
+                residual = self.get_image('science', band) - model
+                self.set_image(residual, 'residual', band)
+
             self.logger.debug(f'Built residual image for {band}')
+            if len(bands) == 1:
+                return residual
+            else:
+                residuals[band] = residual
+                    
+        return residuals
+            
 
-    def build_chi_image(self, bands=None, imgtype='science', overwrite=True):
+    def build_chi_image(self, bands=None, source_id=None, imgtype='science', overwrite=True):
         if bands is None:
             bands = self.engine.bands
         elif np.isscalar(bands):
             bands = [bands,]
+        chis = {}
 
         for band in bands:
-            chi = self.get_image('residual', band) * np.sqrt(self.get_image('weight', band))
-            self.set_image(chi, 'chi', band)
+            if source_id is not None:
+                residual = self.build_residual_image(band, source_id, imgtype, overwrite)
+                chi = residual * np.sqrt(self.get_image('weight', band))
+            else:
+                chi = self.get_image('residual', band) * np.sqrt(self.get_image('weight', band))
+                self.set_image(chi, 'chi', band)
+            
             self.logger.debug(f'Built chi image for {band}')
+            if len(bands) == 1:
+                return chi
+            else:
+                chis[band] = chi
+                    
+        return chis
+
+    def get_catalog(self, catalog_band='detection', catalog_imgtype='science'):
+        return self.catalogs[catalog_band][catalog_imgtype]
+    
+    def set_catalog(self, catalog, catalog_band='detection', catalog_imgtype='science'):
+        self.catalogs[catalog_band][catalog_imgtype] = catalog
 
     def plot_image(self, band=None, imgtype=None, tag='', overwrite=True, show_catalog=True, catalog_band='detection', catalog_imgtype='science', show_groups=True):
         # for each band, plot all available images: science, weight, mask, segmap, blobmap, background, rms
@@ -380,6 +1022,9 @@ class BaseImage():
             tag = '_' + tag
 
         in_imgtype = imgtype
+
+        outname = os.path.join(conf.PATH_FIGURES, self.filename.replace('.h5', '_images.pdf'))
+        pdf = matplotlib.backends.backend_pdf.PdfPages(outname)
 
         for band in bands:
             if in_imgtype is None:
@@ -404,6 +1049,11 @@ class BaseImage():
                     if imgtype not in self.data[band].keys():
                         continue
 
+                fig = plt.figure(figsize=(20,20))
+                ax = fig.add_subplot(projection=self.get_wcs(band))
+                ax.set_title(f'{band} {imgtype} {tag}')
+
+
                 self.logger.debug(f'Gathering image: {band} {imgtype}')
                 image = self.get_image(band=band, imgtype=imgtype)
 
@@ -411,108 +1061,147 @@ class BaseImage():
                 if (imgtype in ('science',)) & self.get_property('subtract_background', band=band):
                     background = self.get_background(band)
 
-                if imgtype in ('science', 'model', 'residual'):
+                if imgtype in ('science', 'model', 'residual', 'chi'):
                     # log-scaled
-                    fig = plt.figure(figsize=(10,10),)
-                    ax = fig.add_subplot(projection=self.get_wcs(band))
-                    vmin, vmax = np.max([self.get_property('median', band=band) + self.get_property('rms', band=band), 1E-5]), np.nanmax(image)
-                    if vmin >= vmax:
-                        vmax = vmin
-                    norm = LogNorm(vmin, vmax, clip='True')
+                    vmax, rms = np.nanmax(image), self.get_property('rms', band=band)
+                    if vmax < rms:
+                        vmax = 3*rms
+                    norm = LogNorm(rms, vmax)
                     options = dict(cmap='Greys', norm=norm)
                     im = ax.imshow(image - background, **options)
                     fig.colorbar(im, orientation="horizontal", pad=0.2)
-                    pixscl = self.pixel_scales[band][0].value, self.pixel_scales[band][0].value
-                    brick_buffer_pix = conf.BRICK_BUFFER.to(u.deg).value * pixscl[0], conf.BRICK_BUFFER.to(u.deg).value * pixscl[1]
-                    ax.add_patch(Rectangle(brick_buffer_pix, self.size[0].value, self.size[1].value,
-                                     fill=False, alpha=0.3, edgecolor='purple', linewidth=1))
+                    pixscl = self.pixel_scales[band][0].to(u.deg).value, self.pixel_scales[band][0].to(u.deg).value
+                    if self.type == 'brick':
+                        brick_buffer_pix = conf.BRICK_BUFFER.to(u.deg).value / pixscl[0], conf.BRICK_BUFFER.to(u.deg).value / pixscl[1]
+                        ax.add_patch(Rectangle(brick_buffer_pix, self.size[0].to(u.deg).value / pixscl[0], self.size[1].to(u.deg).value / pixscl[1],
+                                        fill=False, alpha=0.3, edgecolor='purple', linewidth=1))
                     # show centroids
                     if show_catalog & (catalog_band in self.catalogs.keys()):
                         if catalog_imgtype in self.catalogs[catalog_band].keys():
                             coords = SkyCoord(self.catalogs[catalog_band][catalog_imgtype]['ra'], self.catalogs[catalog_band][catalog_imgtype]['dec'])
                             pos = self.wcs[band].world_to_pixel(coords)
-                            ax.scatter(pos[0], pos[1], 20, marker='o', edgecolors='g', lw=1, facecolors='none', alpha=0.2)
+                            for source_id, x, y in zip(self.catalogs[catalog_band][catalog_imgtype]['ID'], pos[0], pos[1]):
+                                if self.type == 'group':
+                                    ax.annotate(source_id, (x, y), (x-2, y-4), color='r', alpha=0.8, fontsize=10, horizontalalignment='right')
+                                    ax.hlines(y, x-5, x-2, color='r', alpha=0.8, lw=1)
+                                    ax.vlines(x, y-5, y-2, color='r', alpha=0.8, lw=1)
+                                else:
+                                    ax.scatter(x, y, color='r', marker='.', s=1)
+
                     # show group extents
                     if show_groups:
-                        # groupmap = self.get_image(band=catalog_band, imgtype='groupmap')
-                        for gid in tqdm(self.group_ids[catalog_band][catalog_imgtype]):
+                        groupmap = self.get_image(band=catalog_band, imgtype='groupmap')
+                        for group_id in tqdm(self.group_ids[catalog_band][catalog_imgtype]):
+
+                            # use groupmap from brick to get position and buffsize
+                            group_npix = np.sum(groupmap==group_id) #TODO -- save this somewhere
+                            assert(group_npix > 0, f'No pixels belong to group #{group_id}!')
                             try:
-                                group = Group(gid, self)
+                                idy, idx = np.array(groupmap==group_id).nonzero()
                             except:
-                                continue
-                            idy, idx = group.position.to_pixel(self.wcs[band])
-                            dx, dy = group.size[0].to(u.deg).value / pixscl[0], group.size[1].to(u.deg).value / pixscl[1]
-                            xlo = idx - dx / 2
-                            ylo = idy - dy / 2
-                            bdx = dx + 2 * conf.GROUP_BUFFER.to(u.deg).value * pixscl[0]
-                            bdy = dy + 2 * conf.GROUP_BUFFER.to(u.deg).value * pixscl[1]
-                            rect = Rectangle((ylo, xlo), bdy, bdx, fill=False, alpha=0.3,
+                                raise RuntimeError(f'Cannot extract dimensions of Group #{group_id}!')
+                            xlo, xhi = np.min(idx), np.max(idx) + 1
+                            ylo, yhi = np.min(idy), np.max(idy) + 1
+                            group_width = xhi - xlo
+                            group_height = yhi - ylo
+
+                            buffsize = (conf.GROUP_BUFFER.to(u.deg) / self.pixel_scales[band][0].to(u.deg)).value,\
+                                         (conf.GROUP_BUFFER.to(u.deg) / self.pixel_scales[band][1].to(u.deg)).value
+
+                            xlo -= buffsize[0]
+                            ylo -= buffsize[1]
+                            bdx, bdy = group_width + 2 * buffsize[0], group_height + 2 * buffsize[1]
+
+                            rect = Rectangle((xlo, ylo), bdx, bdy, fill=False, alpha=0.3,
                                                     edgecolor='red', zorder=3, linewidth=1)
                             ax.add_patch(rect)
-                            ax.annotate(str(gid), (ylo, xlo), color='g', fontsize=2)
+                            ax.annotate(str(group_id), (xlo, ylo), color='r', fontsize=2)
 
                     fig.tight_layout()
-                    filename = self.get_figprefix(imgtype, band) + f'_log10{tag}.pdf'
-                    fig.savefig(os.path.join(conf.PATH_FIGURES, filename), overwrite=overwrite, dpi=300)
-                    self.logger.debug(f'Saving figure: {filename}')                
-                    plt.close(fig)
+                    pdf.savefig(fig)
+                    plt.close()
 
                     # lin-scaled
-                    fig = plt.figure(figsize=(10,10),)
+                    fig = plt.figure(figsize=(20,20))
                     ax = fig.add_subplot(projection=self.get_wcs(band))
+                    ax.set_title(f'{band} {imgtype} {tag}')
                     options = dict(cmap='RdGy', vmin=-5*self.get_property('rms', band=band), vmax=5*self.get_property('rms', band=band))
                     im = ax.imshow(image - background, **options)
                     fig.colorbar(im, orientation="horizontal", pad=0.2)
-                    ax.add_patch(Rectangle(brick_buffer_pix, self.size[0].value, self.size[1].value,
+                    if self.type == 'brick':
+                        ax.add_patch(Rectangle(brick_buffer_pix, self.size[0].value, self.size[1].value,
                                      fill=False, alpha=0.3, edgecolor='purple', linewidth=1))
                     if show_catalog & (catalog_band in self.catalogs.keys()):
                         if catalog_imgtype in self.catalogs[catalog_band].keys():
                             coords = SkyCoord(self.catalogs[catalog_band][catalog_imgtype]['ra'], self.catalogs[catalog_band][catalog_imgtype]['dec'])
                             pos = self.wcs[band].world_to_pixel(coords)
-                            ax.scatter(pos[0], pos[1], 20, marker='o', edgecolors='g', lw=1, facecolors='none', alpha=0.2)
-                    filename = self.get_figprefix(imgtype, band) + f'_rms{tag}.pdf'
+                            for source_id, x, y in zip(self.catalogs[catalog_band][catalog_imgtype]['ID'], pos[0], pos[1]):
+                                if self.type == 'group':
+                                    ax.annotate(source_id, (x, y), (x-2, y-4), color='r', alpha=0.8, fontsize=10, horizontalalignment='right')
+                                    ax.hlines(y, x-5, x-2, color='r', alpha=0.8, lw=1)
+                                    ax.vlines(x, y-5, y-2, color='r', alpha=0.8, lw=1)
+                                else:
+                                    ax.scatter(x, y, color='r', marker='.', s=1)
                     fig.tight_layout()
-                    fig.savefig(os.path.join(conf.PATH_FIGURES, filename), overwrite=overwrite, dpi=300)
-                    self.logger.debug(f'Saving figure: {filename}')                
-                    plt.close(fig)
 
                 if imgtype in ('chi'):
-                    fig = plt.figure(figsize=(10,10),)
-                    ax = fig.add_subplot(projection=self.get_wcs(band))
                     options = dict(cmap='RdGy', vmin=-3, vmax=3)
                     im = ax.imshow(image, **options)
                     fig.colorbar(im, orientation="horizontal", pad=0.2)
+                    if show_catalog & (catalog_band in self.catalogs.keys()):
+                        if catalog_imgtype in self.catalogs[catalog_band].keys():
+                            coords = SkyCoord(self.catalogs[catalog_band][catalog_imgtype]['ra'], self.catalogs[catalog_band][catalog_imgtype]['dec'])
+                            pos = self.wcs[band].world_to_pixel(coords)
+                            for source_id, x, y in zip(self.catalogs[catalog_band][catalog_imgtype]['ID'], pos[0], pos[1]):
+                                if self.type == 'group':
+                                    ax.annotate(source_id, (x, y), (x-2, y-4), color='r', alpha=0.8, fontsize=10, horizontalalignment='right')
+                                    ax.hlines(y, x-5, x-2, color='r', alpha=0.8, lw=1)
+                                    ax.vlines(x, y-5, y-2, color='r', alpha=0.8, lw=1)
+                                else:
+                                    ax.scatter(x, y, color='r', marker='+', s=1)
                     fig.tight_layout()
-                    filename = self.get_figprefix(imgtype, band) + '{tag}.pdf'
-                    fig.savefig(os.path.join(conf.PATH_FIGURES, filename), overwrite=overwrite, dpi=300)
-                    self.logger.debug(f'Saving figure: {filename}')                
-                    plt.close(fig)
                 
                 if imgtype in ('weight', 'mask'):
-                    fig = plt.figure(figsize=(10,10),)
-                    ax = fig.add_subplot(projection=self.get_wcs(band))
                     options = dict(cmap='Greys', vmin=np.min(image), vmax=np.max(image))
                     im = ax.imshow(image, **options)
                     fig.colorbar(im, orientation="horizontal", pad=0.2)
+                    if show_catalog & (catalog_band in self.catalogs.keys()):
+                        if catalog_imgtype in self.catalogs[catalog_band].keys():
+                            coords = SkyCoord(self.catalogs[catalog_band][catalog_imgtype]['ra'], self.catalogs[catalog_band][catalog_imgtype]['dec'])
+                            pos = self.wcs[band].world_to_pixel(coords)
+                            for source_id, x, y in zip(self.catalogs[catalog_band][catalog_imgtype]['ID'], pos[0], pos[1]):
+                                if self.type == 'group':
+                                    ax.annotate(source_id, (x, y), (x-2, y-4), color='r', alpha=0.8, fontsize=10, horizontalalignment='right')
+                                    ax.hlines(y, x-5, x-2, color='r', alpha=0.8, lw=1)
+                                    ax.vlines(x, y-5, y-2, color='r', alpha=0.8, lw=1)
+                                else:
+                                    ax.scatter(x, y, color='r', marker='+', s=1)
                     fig.tight_layout()
-                    filename = self.get_figprefix(imgtype, band) + '{tag}.pdf'
-                    fig.savefig(os.path.join(conf.PATH_FIGURES, filename), overwrite=overwrite, dpi=300)
-                    self.logger.debug(f'Saving figure: {filename}')                
-                    plt.close(fig)
             
                 if imgtype in ('segmap', 'groupmap'):
-                    fig = plt.figure(figsize=(10,10),)
-                    ax = fig.add_subplot(projection=self.get_wcs(band))
                     options = dict(cmap='prism', vmin=np.min(image[image!=0]), vmax=np.max(image))
                     image = image.copy().astype('float')
                     image[image==0] = np.nan
                     im = ax.imshow(image, **options)
                     fig.colorbar(im, orientation="horizontal", pad=0.2)
+                    if show_catalog & (catalog_band in self.catalogs.keys()):
+                        if catalog_imgtype in self.catalogs[catalog_band].keys():
+                            coords = SkyCoord(self.catalogs[catalog_band][catalog_imgtype]['ra'], self.catalogs[catalog_band][catalog_imgtype]['dec'])
+                            pos = self.wcs[band].world_to_pixel(coords)
+                            for source_id, x, y in zip(self.catalogs[catalog_band][catalog_imgtype]['ID'], pos[0], pos[1]):
+                                if self.type == 'group':
+                                    ax.annotate(source_id, (x, y), (x-2, y-4), color='r', alpha=0.8, fontsize=10, horizontalalignment='right')
+                                    ax.hlines(y, x-5, x-2, color='r', alpha=0.8, lw=1)
+                                    ax.vlines(x, y-5, y-2, color='r', alpha=0.8, lw=1)
+                                else:
+                                    ax.scatter(x, y, color='r', marker='+', s=1)
                     fig.tight_layout()
-                    filename = self.get_figprefix(imgtype, band) + '{tag}.pdf'
-                    fig.savefig(os.path.join(conf.PATH_FIGURES, filename), overwrite=overwrite, dpi=300)
-                    self.logger.debug(f'Saving figure: {filename}')                
-                    plt.close(fig)
+
+                pdf.savefig(fig)
+                plt.close()
+
+        self.logger.info(f'Saving figure: {outname}') 
+        pdf.close()
 
     def plot_psf(self, band=None, overwrite=True):
           
@@ -556,14 +1245,473 @@ class BaseImage():
             fig.savefig(figname, overwrite=overwrite)
             plt.close(fig)
 
-    def transfer_maps(self, catalog_band='detection'):
+    def plot_summary(self, source_id=None, bands=None, stage=None, tag=None, catalog_band='detection', catalog_imgtype='science', overwrite=True):
+        # show the group or source image, model, residuals, background, psf, distributions + statistics
+        
+
+        if bands is None:
+            bands = self.get_bands()
+            if 'detection' in bands:
+                bands = bands[bands!='detection']
+        elif np.isscalar(bands):
+            bands = [bands,]
+
+        if stage is None:
+            stage = np.max(list(self.model_tracker['group'].keys()))
+
+        catalog = self.get_catalog(catalog_band, catalog_imgtype)
+
+        if source_id is None:
+            sources = list(self.model_tracker.keys())
+        else:
+            if np.isscalar(source_id):
+                sources = [source_id,]
+            else:
+                sources = source_id
+
+        for source_id in sources:
+            fnsrc = ''
+            if source_id != 'group':
+                fnsrc  = f'S{source_id}_'
+            if tag is not None:
+                fnsrc += f'{tag}_'
+            outname = os.path.join(conf.PATH_FIGURES, fnsrc + self.filename.replace('.h5', '_summary.pdf'))
+            pdf = matplotlib.backends.backend_pdf.PdfPages(outname)
+
+            for band in bands:
+
+                bandname = 'detection'
+                if band != 'detection':
+                    bandname = conf.BANDS[band]['name']
+
+                # set up
+                fig, axes = plt.subplots(ncols=4, nrows=4, figsize=(15, 15))
+
+                [ax.tick_params(labelbottom=False, labelleft=False) for ax in axes[0:3,:].flatten()]
+
+                # information
+                [ax.axis('off') for ax in axes[0, 1:-1]]
+                if source_id == 'group':
+                    axes[0,1].text(0, 1, f'Group #{self.group_id} (Brick #{self.brick_id})', transform=axes[0,1].transAxes) 
+                    axes[0,1].text(0, 0.8, f'N = {len(self.source_ids)} sources {self.source_ids}', transform=axes[0,1].transAxes) 
+                    stats = self.model_tracker['group'][stage]
+                    axes[0,1].text(0, 0.7, f'Total  $\chi^2_N$ = {stats["rchisq"]:2.2f} ({stats["rchisqmodel"]:2.2f}) N(DOF) = {stats["ndof"]} with {stats["nres"]:2.2f} resolution elements', transform=axes[0,1].transAxes)
+                    axes[0,1].text(0, 0.6, f'        <$\chi$> = {stats["chi_pc50"]:2.2f} | $\sigma$($\chi$) = {stats["chi_pc84"] - stats["chi_pc16"]:2.2f} | $K^2$ = {stats["chi_k2"]:2.2f}', transform=axes[0,1].transAxes)
+                    stats = self.model_tracker['group'][stage][band]
+                    axes[0,1].text(0, 0.5, f'{conf.BANDS[band]["name"]}  $\chi^2_N$ = {stats["rchisq"]:2.2f} ({stats["rchisqmodel"]:2.2f}) N(DOF) = {stats["ndof"]} with {stats["nres"]:2.2f} resolution elements', transform=axes[0,1].transAxes)
+                    axes[0,1].text(0, 0.4, f'        <$\chi$> = {stats["chi_pc50"]:2.2f} | $\sigma$($\chi$) = {stats["chi_pc84"] - stats["chi_pc16"]:2.2f} | $K^2$ = {stats["chi_k2"]:2.2f}', transform=axes[0,1].transAxes)
+
+                else:
+                    model = self.model_tracker[source_id][stage]['model']
+                    axes[0,1].text(0, 1, f'Source #{source_id} (Group #{self.group_id}, Brick #{self.brick_id})', transform=axes[0,1].transAxes)
+                    axes[0,1].text(0, 0.8, f'Model type: {model.name}', transform=axes[0,1].transAxes)
+                    stats = self.model_tracker[source_id][stage]
+                    axes[0,1].text(0, 0.7, f'Total  $\chi^2_N$ = {stats["rchisq"]:2.2f} ({stats["rchisqmodel"]:2.2f}) N(DOF) = {stats["ndof"]} with {stats["nres"]:2.2f} resolution elements', transform=axes[0,1].transAxes)
+                    axes[0,1].text(0, 0.6, f'        <$\chi$> = {stats["chi_pc50"]:2.2f} | $\sigma$($\chi$) = {stats["chi_pc84"] - stats["chi_pc16"]:2.2f} | $K^2$ = {stats["chi_k2"]:2.2f}', transform=axes[0,1].transAxes)
+                    stats = self.model_tracker[source_id][stage][band]
+                    axes[0,1].text(0, 0.5, f'{conf.BANDS[band]["name"]}  $\chi^2_N$ = {stats["rchisq"]:2.2f} ({stats["rchisqmodel"]:2.2f}) N(DOF) = {stats["ndof"]} with {stats["nres"]:2.2f} resolution elements', transform=axes[0,1].transAxes)
+                    axes[0,1].text(0, 0.4, f'        <$\chi$> = {stats["chi_pc50"]:2.2f} | $\sigma$($\chi$) = {stats["chi_pc84"] - stats["chi_pc16"]:2.2f} | $K^2$ = {stats["chi_k2"]:2.2f}', transform=axes[0,1].transAxes)
+
+                    source = get_params(model)
+                    mag, mag_err = source[f'{band}.mag'].value, source[f'{band}.mag.err']
+                    flux, flux_err = source[f'{band}.flux.ujy'].value, source[f'{band}.flux.ujy.err'].value
+                    zpt = source[f'_{band}.zpt']
+                    str_fracdev = ''
+                    if isinstance(model, FixedCompositeGalaxy):
+                        fracdev, fracdev_err = source['fracdev'], source['fracdev.err']
+                        str_fracdev = r'$\\mathcal{F}$(Dev)' + f'{fracdev:2.2f}+/-{fracdev_err:2.2f}'
+                    axes[0,1].text(0, 0.3, f'{bandname}: {mag:2.2f}+/-{mag_err:2.2f} AB {flux:2.2f}+/-{flux_err:2.2f} uJy (zpt = {zpt}) {str_fracdev}', transform=axes[0,1].transAxes)
+                    pos = source['ra'], source['dec']
+                    axes[0,1].text(0, 0.2, f'Position:   ({pos[0]:2.2f}, {pos[1]:2.2f})', transform=axes[0,1].transAxes)
+                    if isinstance(model, (ExpGalaxy, DevGalaxy)) & ~isinstance(model, SimpleGalaxy):
+                        reff, reff_err = source['reff'].value, source['reff.err'].value
+                        ba, ba_err = source['ba'], source['ba.err']
+                        pa, pa_err = source['pa'].value, source['pa.err'].value
+                        axes[0,1].text(0, 0.1, r'Shape:   $R_{\rm eff} = $' + f'{reff:2.2f}+/-{reff_err:2.2f}\" $b/a$ = {ba:2.2f}+/{ba_err:2.2f}  $\\theta$ = {pa:2.1}+/-{pa_err:2.1f}'+r'$\degree$', transform=axes[0,1].transAxes)
+                    elif isinstance(model, FixedCompositeGalaxy):
+                        for skind, yloc in zip(('.exp', '.dev'), (0.1, 0.0)):
+                            reff, reff_err = source[f'reff{skind}'].value, source[f'reff.err{skind}'].value
+                            ba, ba_err = source[f'ba{skind}'], source[f'ba{skind}.err']
+                            pa, pa_err = source[f'pa{skind}'].value, source[f'pa{skind}.err'].value
+                            axes[0,1].text(0, yloc, f'Shape {skind[1:]}:   '+r'$R_{\rm eff} = $' + f'{reff:2.2f}+/-{reff_err}\" $b/a$ = {ba:2.2f}+/{ba_err:2.2f}  $\\theta$ = {pa:2.2f}+/-{pa_err:2.2f}', transform=axes[0,1].transAxes)
+
+                
+
+                groupmap = self.get_image('groupmap', band=band).copy()
+                segmap = self.get_image('segmap', band=band).copy()
+                source_ids = np.unique(segmap)
+                source_ids = source_ids[source_ids>0]
+                cmap = plt.get_cmap('rainbow', len(source_ids))
+                pixscl = self.pixel_scales[band]
+                histbins = np.linspace(-3, 3, 20)
+                hwhm = get_fwhm(self.get_psfmodel(band=band)) / 2. * pixscl[0].to(u.arcsec).value
+                
+                cutout = self.data[band]['science']
+                upper = self.wcs[band].pixel_to_world(cutout.shape[1], cutout.shape[0])
+                lower = self.wcs[band].pixel_to_world(-1, -1)
+
+                if source_id == 'group':
+                    position = self.position
+                    target_size = self.buffsize
+                else:
+                    ira, idec = catalog['ra'][catalog['ID'] == source_id], catalog['dec'][catalog['ID'] == source_id]
+                    position = SkyCoord(ira, idec)
+                    idx, idy = np.array(segmap==source_id).nonzero()
+                    xlo, xhi = np.min(idx), np.max(idx)
+                    ylo, yhi = np.min(idy), np.max(idy)
+                    group_width = xhi - xlo
+                    group_height = yhi - ylo
+                    target_upper = self.wcs[band].pixel_to_world(group_height, group_width)
+                    target_lower = self.wcs[band].pixel_to_world(0, 0)
+                    target_size = (target_lower.ra - target_upper.ra + 2 * conf.GROUP_BUFFER), \
+                                    (target_upper.dec - target_lower.dec + 2 * conf.GROUP_BUFFER)
+
+                extent = np.array([0.,0.,0.,0.])
+                extent[0], extent[2] = dcoord_to_offset(lower, position)
+                extent[1], extent[3] = dcoord_to_offset(upper, position)
+
+                peakx = np.argmin(np.abs(np.linspace(extent[0], extent[1], cutout.shape[1])))
+                peaky = np.argmin(np.abs(np.linspace(extent[2], extent[3], cutout.shape[0])))
+
+                dx = target_size[1].to(u.arcsec).value / 2.
+                dy = target_size[0].to(u.arcsec).value / 2.
+                ds = np.max([dx, dy])
+                xlim, ylim = [-ds, ds],[-ds, ds]
+                [ax.set(xlim=xlim, ylim=ylim) for ax in axes[:3].flatten()]
+
+                dims = (xlim[1]-xlim[0], ylim[1]-ylim[0])
+
+                segmap = segmap   #[src]
+
+                pos = dims[0] * (-4/10.), dims[1] * (-4/10.)
+                for ax in axes[0:3,:].flatten():
+                    if ax in axes[0, 1:3].flatten():
+                        continue
+                    beam = Circle(pos, hwhm, color='grey')
+                    ax.add_patch(beam)
+                
+
+                # science image
+                img = self.get_image('science', band=band).copy()   #[src]
+                background = 0
+                if self.get_property('subtract_background', band=band):
+                    background = self.get_background(band)
+                if not np.isscalar(background):
+                    background = background   #[src]
+                img -= background
+                rms = self.get_property('rms', band=band)
+                vmax = np.nanmax(img)
+                vmin = self.get_property('median', band=band)
+                axes[0,0].imshow(img, cmap='RdGy', norm=SymLogNorm(rms, 0.5, -vmax, vmax), extent=extent)
+                axes[0,0].text(0.05, 0.90, bandname, transform=axes[0,0].transAxes, fontweight='bold')
+                target_scale = np.round(self.pixel_scales[band][0].to(u.arcsec).value * dims[0] / 3.).astype(int) # arcsec
+                target_scale = np.max([1, target_scale])
+                target_center = 0.75
+                xmin, xmax = target_center - target_scale/dims[0]/2., target_center + target_scale/dims[0]/2.
+                axes[0,0].axhline(dims[1] * (-4/10.), xmin, xmax, c='k')
+                axes[0,0].text(target_center, 0.12, f'{target_scale}\"', transform=axes[0,0].transAxes, fontweight='bold', horizontalalignment='center')
+                
+                axes[3,3].axvline(0, ls='dashed', c='grey')
+                axes[3,3].axvline(-1, ls='dotted', c='grey')
+                axes[3,3].axvline(1, ls='dotted', c='grey')
+                axes[3,3].axhline(0.5, ls='dashed', c='grey')
+                axes[3,3].axhline(0.16, ls='dotted', c='grey')
+                axes[3,3].axhline(0.84, ls='dotted', c='grey')
+                # axes[3,3].hist(img[groupmap>0].flatten(), color='grey', histtype='step', bins=histbins)
+                xcum, ycum = cumulative(self.get_image('science', band=band).copy()[groupmap>0].flatten())
+                axes[3,3].plot(xcum, ycum, color='grey', alpha=0.3)
+                model_patch = []
+                for i, sid in enumerate(source_ids):
+                    # axes[3,3].hist(img[segmap==sid].flatten(), color=cmap(i), histtype='step', bins=histbins)
+                    if (source_id == 'group') or (sid == source_id):
+                        xcum, ycum = cumulative(img[segmap==sid].flatten())
+                        axes[3,3].plot(xcum, ycum, color=cmap(i), alpha=0.3)
+                    if source_id == 'group':
+                        center_position = self.position
+                    else:
+                        ira, idec = catalog['ra'][catalog['ID'] == source_id], catalog['dec'][catalog['ID'] == source_id]
+                        center_position = SkyCoord(ira, idec)
+                    ira, idec = catalog['ra'][catalog['ID'] == sid], catalog['dec'][catalog['ID'] == sid]
+                    ixc, iyc = dcoord_to_offset(SkyCoord(ira, idec), center_position)
+                    axes[0,0].scatter(ixc, iyc, facecolors='none', edgecolors=cmap(i))
+                    model = self.model_catalog[sid] 
+                    ra, dec = model.pos
+                    xc, yc = dcoord_to_offset(SkyCoord(ra*u.deg, dec*u.deg), center_position)
+
+                    if isinstance(model, (PointSource, SimpleGalaxy)):
+                        model_patch += [Circle((xc, yc), hwhm, fc="none", ec=cmap(i)),]
+                    elif isinstance(model, (ExpGalaxy, DevGalaxy)) & ~isinstance(model, SimpleGalaxy):
+                        shape = model.getShape()
+                        width, height = np.abs(np.diff(shape.getRaDecBasis()*3600))
+                        angle = np.rad2deg(shape.theta)
+                        model_patch += [Ellipse((xc, yc), width, height, angle, fc="none", ec=cmap(i)),]
+                    elif isinstance(model, (FixedCompositeGalaxy)):
+                        shape = model.shapeExp
+                        width, height = np.abs(np.diff(shape.getRaDecBasis()*3600))
+                        angle = np.rad2deg(shape.theta)
+                        model_patch += [Ellipse((xc, yc), width, height, angle, fc="none", ec=cmap(i)),]
+                        shape = model.shapeDev
+                        width, height = np.abs(np.diff(shape.getRaDecBasis()*3600))
+                        angle = np.rad2deg(shape.theta)
+                        model_patch += [Ellipse((xc, yc), width, height, angle, fc="none", ec=cmap(i)),]
+
+                    
+                    for ax in (axes[0,0], axes[0,3]):
+                        ax.scatter(xc, yc, color=cmap(i), marker='+')
+                        ax.annotate(int(sid), (xc, yc), (xc-0.1, yc-0.1), c=cmap(i), horizontalalignment='right', verticalalignment='top')
+                    for ax in axes[1:3,:].flatten():
+                        ax.scatter(xc, yc, color=cmap(i), marker='+')
+
+                for ax in (axes[0,0], axes[0,3]):
+                    [ax.add_patch(copy.copy(mp)) for mp in model_patch]
+                for ax in axes[1:3,:].flatten():
+                    [ax.add_patch(copy.copy(mp)) for mp in model_patch]
+
+
+
+                # detection image
+                if 'detection' in self.bands:
+                    img = self.get_image('science', band='detection').copy()   #[src]
+                    background = 0
+                    if self.get_property('subtract_background', band='detection'):
+                        background = self.get_background(band)
+                    img -= background
+                    srms = self.get_property('rms', band='detection')
+                    svmax = np.nanmax(img)
+                    axes[0,3].imshow(img, cmap='RdGy', norm=SymLogNorm(srms, 0.5, -svmax, svmax), extent=extent)
+                    axes[0,3].text(0.05, 0.90, 'detection', transform=axes[0,3].transAxes, fontweight='bold')
+                    axes[0,3].axhline(dims[1] * (-4/10.), xmin, xmax, c='k')
+                    axes[0,3].text(target_center, 0.12, f'{target_scale}\"', transform=axes[0,3].transAxes, fontweight='bold', horizontalalignment='center')
+
+                # science image
+                img = self.get_image('science', band=band).copy()   #[src]
+                axes[1,0].imshow(img, cmap='Greys', norm=LogNorm(vmin, vmax), extent=extent)
+                axes[1,0].text(0.05, 0.90, 'Science', transform=axes[1,0].transAxes, fontweight='bold')
+                axes[1,0].axhline(dims[1] * (-4/10.), xmin, xmax, c='k')
+                axes[1,0].text(target_center, 0.12, f'{target_scale}\"', transform=axes[1,0].transAxes, fontweight='bold', horizontalalignment='center')
+
+                px = np.linspace(extent[2], extent[3], np.shape(img)[0])
+                py = img[:,peakx]
+                wgt = self.get_image('weight', band=band).copy()   #[src]
+                epy = np.where(wgt<=0, 0, 1/np.sqrt(wgt))[:,peakx]
+                max1 = np.max(py + 3*epy)
+                axes[3,1].errorbar(px[epy>0], py[epy>0], yerr=epy[epy>0], c='k', capsize=0, marker='.', ls='')
+                axes[3,1].errorbar(px[epy==0], py[epy==0], yerr=epy[epy==0], mfc='none', mec='k', capsize=0, marker='.', ls='')
+                axes[3,1].axvline(0, ls='dashed', c='grey')
+                axes[3,1].axhline(0, ls='solid', c='grey')
+                axes[3,1].axhline(-rms, ls='dotted', c='grey')
+                axes[3,1].axhline(rms, ls='dotted', c='grey')
+                axes[3,1].text(0.05, 0.90, f'$X=0$ Slice', transform=axes[3,1].transAxes, fontweight='bold')
+                
+                px = np.linspace(extent[0], extent[1], np.shape(img)[1])
+                py = img[peaky]
+                wgt = self.get_image('weight', band=band).copy()   #[src]
+                epy = np.where(wgt<=0, 0, 1/np.sqrt(wgt))[peaky]
+                max2 = np.max(py + 3*epy)
+                axes[3,2].errorbar(px[epy>0], py[epy>0], yerr=epy[epy>0], c='k', capsize=0, marker='.', ls='')
+                axes[3,2].errorbar(px[epy==0], py[epy==0], yerr=epy[epy==0], mfc='none', mec='k', capsize=0, marker='.', ls='')
+                axes[3,2].axvline(0, ls='dashed', c='grey')
+                axes[3,2].axhline(0, ls='solid', c='grey')
+                axes[3,2].axhline(-rms, ls='dotted', c='grey')
+                axes[3,2].axhline(rms, ls='dotted', c='grey')
+                axes[3,2].text(0.05, 0.90, f'$Y=0$ Slice', transform=axes[3,2].transAxes, fontweight='bold')
+
+                axes[3,1].set(xlim=xlim, xlabel='arcsec', ylim=(-3*rms, np.max([max1, max2])))
+                axes[3,2].set(xlim=ylim, xlabel='arcsec', ylim=(-3*rms, np.max([max1, max2])))
+
+                # model image
+                img = self.get_image('model', band=band).copy()   #[src]
+                axes[1,1].imshow(img, cmap='Greys', norm=LogNorm(vmin, vmax), extent=extent)
+                axes[1,1].text(0.05, 0.90, 'Model', transform=axes[1,1].transAxes, fontweight='bold')
+                axes[1,1].axhline(dims[1] * (-4/10.), xmin, xmax, c='k')
+                axes[1,1].text(target_center, 0.12, f'{target_scale}\"', transform=axes[1,1].transAxes, fontweight='bold', horizontalalignment='center')
+
+                # px = np.linspace(extent[2], extent[3], np.shape(img)[0])
+                # py = img[:,peakx]
+                # axes[3,1].plot(px, py, color='g')
+
+                # px = np.linspace(extent[0], extent[1], np.shape(img)[1])
+                # py = img[peaky]
+                # axes[3,2].plot(px, py, color='g')
+
+                nx, ny = np.shape(img)
+                psf = self.get_psfmodel(band)
+                scl = 1
+                zoomed_psf = ndimage.zoom(psf, scl)
+                zoomed_psf /= np.sum(zoomed_psf)
+                zoomed_wcs = read_wcs(self.wcs[band], scl)
+                tr_img = Image(
+                    data=np.zeros((scl*nx, scl*ny)),
+                    invvar=np.ones((scl*nx, scl*ny)),
+                    psf=PixelizedPSF(zoomed_psf),
+                    wcs=zoomed_wcs,
+                    photocal=FluxesPhotoCal(band),
+                    sky=ConstantSky(0)
+                    )
+                srcs = []
+                for i, sid in enumerate(self.source_ids):
+                    isrc = self.model_catalog[sid]
+                    srcs.append(isrc)
+
+                    img = Tractor([tr_img,], Catalog(*[isrc,])).getModelImage(0) * scl**2
+                    flux = isrc.getBrightness().getFlux(band)
+                    eflux = np.sqrt(isrc.variance.getBrightness().getFlux(band))
+                    frac = eflux / flux
+                    inx, iny = np.shape(img)
+
+                    ipeakx = np.argmin(np.abs(np.linspace(extent[0], extent[1], iny))) 
+                    ipeaky = np.argmin(np.abs(np.linspace(extent[2], extent[3], inx)))
+                    
+                    px = np.linspace(extent[2], extent[3], inx)
+                    py = img[:,ipeakx]
+                    py_lo = py * (1 - frac)
+                    py_hi = py * (1 + frac)
+                    axes[3,1].plot(px, py, color=cmap(i))
+                    if (source_id == 'group') | (sid == source_id):
+                        axes[3,1].fill_between(px, py_lo, py_hi, color=cmap(i), alpha=0.5)
+
+                    px = np.linspace(extent[0], extent[1], iny)
+                    py = img[ipeaky]
+                    py_lo = py * (1 - frac)
+                    py_hi = py * (1 + frac)
+                    axes[3,2].plot(px, py, color=cmap(i))
+                    if (source_id == 'group') | (sid == source_id):
+                        axes[3,2].fill_between(px, py_lo, py_hi, color=cmap(i), alpha=0.5)
+
+                img = Tractor([tr_img,], Catalog(*srcs)).getModelImage(0) * scl**2
+                inx, iny= np.shape(img)
+                ipeakx = np.argmin(np.abs(np.linspace(extent[0], extent[1], iny))) 
+                ipeaky = np.argmin(np.abs(np.linspace(extent[2], extent[3], inx)))
+
+                px = np.linspace(extent[2], extent[3], inx)
+                py = img[:,ipeakx]
+                axes[3,1].plot(px, py, color='grey', zorder=-99)
+
+                px = np.linspace(extent[0], extent[1], iny)
+                py = img[ipeaky]
+                axes[3,2].plot(px, py, color='grey', zorder=-99)
+
+                # residual image
+                img = self.get_image('residual', band=band).copy()   #[src]
+                axes[1,2].imshow(img, cmap='RdGy', norm=Normalize(-3*rms, 3*rms), extent=extent)
+                axes[1,2].text(0.05, 0.90, 'Residual', transform=axes[1,2].transAxes, fontweight='bold')
+                axes[1,2].axhline(dims[1] * (-4/10.), xmin, xmax, c='k')
+                axes[1,2].text(target_center, 0.12, f'{target_scale}\"', transform=axes[1,2].transAxes, fontweight='bold', horizontalalignment='center')
+
+                px = np.linspace(extent[2], extent[3], np.shape(img)[0])
+                py = img[:,peakx]
+                wgt = self.get_image('weight', band=band).copy()   #[src]
+                epy = np.where(wgt<=0, 0, 1/np.sqrt(wgt))[:,peakx]
+                axes[3,1].errorbar(px, py, yerr=epy, c='g', capsize=0, marker='.', ls='')
+
+                px = np.linspace(extent[0], extent[1], np.shape(img)[1])
+                py = img[peaky]
+                wgt = self.get_image('weight', band=band).copy()   #[src]
+                epy = np.where(wgt<=0, 0, 1/np.sqrt(wgt))[peaky]
+                axes[3,2].errorbar(px, py, yerr=epy, c='g', capsize=0, marker='.', ls='')
+
+                xcum, ycum = cumulative(self.get_image('residual', band=band).copy()[groupmap>0].flatten())
+                axes[3,3].plot(xcum, ycum, color='grey')
+                # axes[3,3].hist(img[groupmap>0].flatten(), color='grey', histtype='step', bins=histbins)
+                for i, sid in enumerate(source_ids):
+                    if (source_id == 'group') or (sid == source_id):
+                        # axes[3,3].hist(img[segmap==sid].flatten(), color=cmap(i), histtype='step', bins=histbins)
+                        xcum, ycum = cumulative(img[segmap==sid].flatten())
+                        axes[3,3].plot(xcum, ycum, color=cmap(i))
+                axes[3,3].set(xlim=(-2, 2), ylim=(0, 1), xlabel='$\chi$')
+                axes[3,3].text(0.05, 0.90, 'CDF($\chi$)', transform=axes[3,3].transAxes, fontweight='bold')
+
+                # science image
+                img = self.get_image('science', band=band).copy()   #[src]
+                axes[1,3].imshow(img, cmap='RdGy', norm=Normalize(-3*rms, 3*rms), extent=extent)
+                axes[1,3].text(0.05, 0.90, 'Science', transform=axes[1,3].transAxes, fontweight='bold')
+                axes[1,3].axhline(dims[1] * (-4/10.), xmin, xmax, c='k')
+                axes[1,3].text(target_center, 0.12, f'{target_scale}\"', transform=axes[1,3].transAxes, fontweight='bold', horizontalalignment='center')
+
+
+                # weight image
+                img = self.get_image('weight', band=band).copy()   #[src]
+                vmax = np.max(img)
+                axes[2,0].imshow(img, cmap='Greys', norm=Normalize(0, vmax), extent=extent)
+                axes[2,0].text(0.05, 0.90, 'Weight', transform=axes[2,0].transAxes, fontweight='bold')
+                axes[2,0].axhline(dims[1] * (-4/10.), xmin, xmax, c='k')
+                axes[2,0].text(target_center, 0.12, f'{target_scale}\"', transform=axes[2,0].transAxes, fontweight='bold', horizontalalignment='center')
+
+                # background
+                img = self.get_image('background', band=band).copy()   #[src]
+                vmin, vmax = np.nanmin(img), np.nanmax(img)
+                axes[2,1].imshow(img, cmap='Greys', norm=Normalize(vmin, vmax), extent=extent)
+                backtype = self.get_property('backtype', band=band)
+                backregion = self.get_property('backregion', band=band)
+                axes[2,1].text(0.05, 0.90, f'Background ({backtype}, {backregion})', transform=axes[2,1].transAxes, fontweight='bold')
+                axes[2,1].axhline(dims[1] * (-4/10.), xmin, xmax, c='k')
+                axes[2,1].text(target_center, 0.12, f'{target_scale}\"', transform=axes[2,1].transAxes, fontweight='bold', horizontalalignment='center')
+
+                # mask image
+                img = self.get_image('groupmap', band=band).copy()   #[src]
+                img[img > 0] = 1
+                colors = ['white','grey']
+                bounds = [0, 1, 2]
+                for i, sid in enumerate(source_ids):
+                    img[segmap==sid] = i + 2
+                    colors.append(cmap(i))
+                    bounds.append(i + 3)
+                # make a color map of fixed colors
+                cust_cmap = ListedColormap(colors)
+                norm = BoundaryNorm(bounds, cust_cmap.N)
+                axes[2,2].imshow(img, cmap=cust_cmap, norm=norm, extent=extent)
+                axes[2,2].text(0.05, 0.90, 'Pixel Assignment', transform=axes[2,2].transAxes, fontweight='bold')
+                axes[2,2].axhline(dims[1] * (-4/10.), xmin, xmax, c='k')
+                axes[2,2].text(target_center, 0.12, f'{target_scale}\"', transform=axes[2,2].transAxes, fontweight='bold', horizontalalignment='center')
+
+                # chi
+                img = self.get_image('chi', band=band).copy()   #[src]
+                axes[2,3].imshow(img, cmap='RdGy', norm=Normalize(-3*rms, 3*rms), extent=extent)
+                axes[2,3].text(0.05, 0.90, r'$\chi$', transform=axes[2,3].transAxes, fontweight='bold')
+                axes[2,3].axhline(dims[1] * (-4/10.), xmin, xmax, c='k')
+                axes[2,3].text(target_center, 0.12, f'{target_scale}\"', transform=axes[2,3].transAxes, fontweight='bold', horizontalalignment='center')
+
+                # PSF
+                psfmodel = self.data[band]['psfmodel']
+                pixscl = (self.pixel_scales[band][0]).to(u.arcsec).value
+                xax = np.arange(-np.shape(psfmodel)[0]/2 + 0.5,  np.shape(psfmodel)[0]/2+0.5)
+                [axes[3,0].plot(xax * pixscl, psfmodel[x], c='royalblue', alpha=0.5) for x in np.arange(0, np.shape(psfmodel)[1])]
+                axes[3,0].axvline(0, ls='dashed', c='k')
+                psftype = self.get_property('psfmodel_type', band=band)
+                axes[3,0].text(0.05, 0.90, f'PSF ({psftype})', transform=axes[3,0].transAxes, fontweight='bold')
+                
+                axes[3,0].axvline(-hwhm, ls='dotted', c='grey')
+                axes[3,0].axvline(hwhm, ls='dotted', c='grey')
+
+                x = xax
+                y = x.copy()
+                xv, yv = np.meshgrid(x, y)
+                radius = np.sqrt(xv**2 + xv**2)
+                cumcurve = np.array([np.sum(psfmodel[radius<i]) for i in np.arange(0, np.shape(psfmodel)[0]/2)])
+                hxax = np.arange(0, np.shape(psfmodel)[0]/2) * pixscl
+                axes[3,0].plot(hxax, cumcurve, c='grey')
+                allp = hxax[np.argmin(abs(cumcurve - 0.999))]
+                axes[3,0].set(xlim=(-allp, allp), yscale='log', ylim=(1e-6, 1), xlabel='arcsec')
+
+                pdf.savefig(fig)
+                plt.close()
+
+            self.logger.info(f'Saving figure: {outname}') 
+            pdf.close()
+
+    def transfer_maps(self, bands=None, catalog_band='detection'):
         # rescale segmaps and groupmaps to other bands
         segmap = self.data[catalog_band]['segmap']
         groupmap = self.data[catalog_band]['groupmap']
         catalog_pixscl = np.array([self.pixel_scales[catalog_band][0].value, self.pixel_scales[catalog_band][1].value])
 
+        if bands is None:
+            bands = self.bands
+        elif np.isscalar(bands):
+            bands = [bands,]
+
         # loop over bands
-        for band in self.bands:
+        for band in bands:
             if band == 'detection':
                 continue
             self.logger.debug(f'Rescaling maps of {band}...')
@@ -588,3 +1736,180 @@ class BaseImage():
                 self.data[band]['weight'].data[~ingroup] = 0
                 self.data[band]['segmap'].data[~ingroup] = 0
                 self.data[band]['groupmap'].data[~ingroup] = 0
+
+    def write(self, filetype=None, allow_update=False, filename=None):
+        if (filetype is None):
+            filename = self.filename
+            self.write_hdf5(allow_update=allow_update, filename=filename)
+            self.write_fits(allow_update=allow_update, filename=filename.replace('.h5', '.fits'))
+            self.write_catalog(allow_update=allow_update, filename=filename.replace('.h5', '.cat'))
+        elif filetype == 'hdf5':
+            self.write_hdf5(allow_update=allow_update, filename=filename)
+        elif filetype == 'fits':
+            self.write_fits(allow_update=allow_update, filename=filename.replace('.h5', '.fits'))
+        elif filetype == 'cat':
+            self.write_catalog(allow_update=allow_update, filename=filename.replace('.h5', '.cat'))
+
+    def write_fits(self, allow_update=False, filename=None, directory=conf.PATH_BRICKS):
+        if filename is None:
+            filename = self.filename.replace('.h5', '.fits')
+        self.logger.debug(f'Writing to {filename} (allow_update = {allow_update})')
+        path = os.path.join(directory, filename)
+        if os.path.exists(path):
+            if not allow_update:
+                raise RuntimeError(f'Cannot update {filename}! (allow_update = False)')
+            else:
+                # open files and add to them
+                hdul = fits.open(path)
+        else:
+            # make new files
+            hdul = fits.HDUList()
+            hdul.append(fits.PrimaryHDU())
+
+        
+        self.logger.debug(f'... adding data to fits')
+        for band in self.data:
+            for attr in self.data[band]:
+                if attr == 'psfmodel':
+                    continue
+                ext_name = f'{band}_{attr}'
+                try:
+                    hdul[ext_name]
+                except:
+                    hdul.append(fits.ImageHDU(name=ext_name))
+                if self.data[band][attr].data.dtype == bool:
+                    hdul[ext_name].data = self.data[band][attr].data.astype(int)
+                else:
+                    hdul[ext_name].data = self.data[band][attr].data
+                # update WCS in header
+                if attr in self.headers[band]:
+                    for (key, value, comment) in self.headers[band][attr].cards:
+                        hdul[ext_name].header[key] = (value, comment)
+                for (key, value, comment) in self.data[band][attr].wcs.to_header().cards:
+                    hdul[ext_name].header[key] = (value, comment)
+                
+                self.logger.debug(f'... added {attr} for {band}')
+
+            if isinstance(self.catalogs[band], Table):
+                ext_name = f'{band}_catalog'
+                try:
+                    hdul[ext_name]
+                except:
+                    hdul.append(fits.BinTableHDU(name=ext_name))
+                hdul[ext_name].data = self.catalogs[band]
+                
+                self.logger.debug(f'... added catalog for {band}')
+
+
+        try:
+            hdul.flush()
+            self.logger.info(f'Updated {filename} (allow_update = {allow_update})')
+        except:
+            hdul.writeto(path, overwrite=conf.OVERWRITE)
+            self.logger.info(f'Wrote to {filename} (allow_update = {allow_update})')
+
+
+    def write_hdf5(self, allow_update=False, filename=None, directory=conf.PATH_BRICKS):
+        if filename is None:
+            filename = self.filename
+        self.logger.debug(f'Writing to {filename} (allow_update = {allow_update})')
+        path = os.path.join(directory, filename) 
+        if os.path.exists(path):
+            if not allow_update:
+                raise RuntimeError(f'Cannot update {filename}! (allow_update = False)')
+            else:
+                # open files and add to them
+                hf = h5py.File(path, 'r+')
+        else:
+            # make new files
+            hf = h5py.File(path, 'w-')
+
+        self.logger.debug(f'... adding attributes to hdf5')
+        recursively_save_dict_contents_to_group(hf, self.__dict__)
+
+        hf.close()
+        if os.path.exists(path):
+            self.logger.info(f'Updated {filename} (allow_update = {allow_update})')
+        else:
+            self.logger.info(f'Wrote to {filename} (allow_update = {allow_update})')
+
+
+    def read_hdf5(self, filename=None, directory=conf.PATH_BRICKS):
+        if filename is None:
+            filename = self.filename
+        
+        path = os.path.join(directory, filename) 
+        if not os.path.exists(path):
+            raise RuntimeError(f'Cannot find file at {path}!')
+        hf = h5py.File(path, 'r')
+        attr = recursively_load_dict_contents_from_group(hf)
+        hf.close()
+        return attr
+
+    def write_catalog(self, bands=None, catalog_imgtype=None, catalog_band=None, allow_update=False, filename=None, directory=conf.PATH_CATALOGS, overwrite=False):
+
+        if catalog_imgtype is None:
+            catalog_imgtype = self.catalog_imgtype
+        if catalog_band is None:
+            catalog_band = self.catalog_band
+        if bands is None:
+            bands = self.bands
+        elif np.isscalar(bands):
+            bands = [bands,]
+        
+
+        if filename is None:
+            filename = self.filename.replace('.h5', '.cat')
+        self.logger.debug(f'Preparing catalog to be written to {filename} (allow_update = {allow_update})')
+        path = os.path.join(directory, filename) 
+        if os.path.exists(path):
+            if overwrite:
+                self.logger.warning(f'I will overwrite existing file {filename}')
+                catalog = self.get_catalog(catalog_band, catalog_imgtype)
+            elif not allow_update:
+                raise RuntimeError(f'Cannot update {filename}! (allow_update = False)')
+            else:
+                # open files and add to them
+                catalog = Table.read(path)
+        else:
+            # make new files from SEP base
+            # NOTE What if there are new things in this run? i.e. residual sources?
+            catalog = self.get_catalog(catalog_band, catalog_imgtype)
+
+        # loop over set
+        for source_id in self.model_catalog:
+            source = self.model_catalog[source_id]
+            group_id = catalog['group_id'][catalog['ID'] == source_id][0]
+            params = get_params(source)
+
+            for name in params:
+                if name.startswith('_'):
+                    continue
+                value = params[name]
+                try:
+                    unit = value.unit
+                    value = value.value
+                except:
+                    unit = None
+                dtype = type(value)
+                if type(value) == str:
+                    dtype = 'S11'
+                if name not in catalog.colnames:
+                    catalog.add_column(Column(length=len(catalog), name=name, dtype=dtype, unit=unit))
+                catalog[name][catalog['ID'] == source_id] = value
+                if type(value) == str:
+                    self.logger.debug(f'G{group_id}.S{source_id} :: {name} = {value}')
+                else:
+                    self.logger.debug(f'G{group_id}.S{source_id} :: {name} = {value:2.2f}')
+
+
+        # update catalog for self
+        self.set_catalog(catalog, catalog_band=catalog_band, catalog_imgtype=catalog_imgtype)
+
+        # write to disk
+        if allow_update | overwrite:
+            catalog.write(path, overwrite=conf.OVERWRITE, format='fits')
+            self.logger.info(f'Updated {filename} (allow_update = {allow_update}, overwrite = {overwrite})')
+        else:
+            catalog.write(path, format='fits')
+            self.logger.info(f'Wrote to {filename} (allow_update = {allow_update}, overwrite = {overwrite})')
