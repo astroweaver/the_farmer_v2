@@ -1,4 +1,3 @@
-from tokenize import group
 import config as conf
 from .image import BaseImage
 from .utils import get_brick_position
@@ -9,7 +8,6 @@ from astropy.wcs import WCS
 import astropy.units as u
 from astropy.nddata import Cutout2D
 import numpy as np
-from typing import OrderedDict
 
 
 class Group(BaseImage):
