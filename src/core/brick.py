@@ -9,7 +9,6 @@ import os
 from astropy.nddata import Cutout2D
 import astropy.units as u
 import numpy as np
-from typing import OrderedDict
 from pathos.pools import ProcessPool
 from copy import copy
 
