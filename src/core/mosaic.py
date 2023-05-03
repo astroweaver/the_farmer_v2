@@ -103,8 +103,9 @@ class Mosaic(BaseImage):
                     if conf.BANDS[band]['backregion'] == 'mosaic':
                         self.estimate_background(band=band, imgtype='science')
             elif band == 'detection':
-                if conf.DETECTION['backregion'] == 'mosaic':
-                        self.estimate_background(band=band, imgtype='science')
+                if 'backregion' in conf.DETECTION:
+                    if conf.DETECTION['backregion'] == 'mosaic':
+                            self.estimate_background(band=band, imgtype='science')
             
 
     def get_bands(self):

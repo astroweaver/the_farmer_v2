@@ -1,4 +1,4 @@
-from enum import auto
+from collections import OrderedDict
 import config as conf
 from .image import BaseImage
 from .utils import get_brick_position, dilate_and_group, clean_catalog
