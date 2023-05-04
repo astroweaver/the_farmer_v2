@@ -68,10 +68,13 @@ OVERWRITE ................. {conf.OVERWRITE}
 from .utils import start_logger
 logger = start_logger()
 
+print('You should start by running farmer.verify()!')
+
 # Look at mosaics and check they exist
-logger.info('Verifying bands...')
-for band in conf.BANDS.keys():
-    Mosaic(band, load=False)
+def verify():
+    logger.info('Verifying bands...')
+    for band in conf.BANDS.keys():
+        Mosaic(band, load=False)
 
 
 def get_mosaic(band, load=True):
@@ -98,12 +101,13 @@ def build_bricks(brick_ids=None, include_detection=True, bands=None, write=False
         bands = ['detection'] + bands
 
     # Generate brick_ids
+    n_bricks = 1
     if brick_ids is None:
         n_bricks = conf.N_BRICKS[0] * conf.N_BRICKS[1]
         brick_ids = 1 + np.arange(n_bricks)
 
     # Build bricks
-    if np.isscalar(brick_ids): # single brick built in memory and saved
+    if np.isscalar(brick_ids) | (n_bricks == 1): # single brick built in memory and saved
         for band in bands:
             mosaic = get_mosaic(band, load=True)
             try:
@@ -184,25 +188,11 @@ def update_bricks(brick_ids=None, bands=None):
                     brick.plot_image(show_catalog=False, show_groups=False)
             del mosaic
 
-def detect_sources(brick_ids=None, band='detection', imgtype='science', mosaic=None, write=False):
+def detect_sources(brick_ids=None, band='detection', imgtype='science', brick=None, write=False):
 
-    # Generate brick_ids
-    if brick_ids is None:
-        n_bricks = conf.N_BRICKS[0] * conf.N_BRICKS[1]
-        brick_ids = 1 + np.arange(n_bricks)
-    elif np.isscalar(brick_ids):
-        brick_ids = [brick_ids,]
-
-    # Loop over bricks
-    for brick_id in brick_ids:
-        
-        # does the brick exist? load it.
-        try:
-            brick = get_brick(brick_id)
-        except:
-            brick = build_bricks(brick_id,  bands='detection')
-
-        # detection
+    if brick_id is None and brick is not None:
+        # run the brick given directly
+        # This can also be run by brick.detect_sources, but we also write it out if asked for!
         brick.detect_sources(band=band, imgtype=imgtype)
 
         if write:
@@ -210,6 +200,35 @@ def detect_sources(brick_ids=None, band='detection', imgtype='science', mosaic=N
 
         return brick
 
+    elif brick_id is not None and brick is None:
+        # run the brick(s) asked for
+
+        # Generate brick_ids
+        if brick_ids is None:
+            n_bricks = conf.N_BRICKS[0] * conf.N_BRICKS[1]
+            brick_ids = 1 + np.arange(n_bricks)
+        elif np.isscalar(brick_ids):
+            brick_ids = [brick_ids,]
+
+        # Loop over bricks
+        for brick_id in brick_ids:
+            
+            # does the brick exist? load it.
+            try:
+                brick = get_brick(brick_id)
+            except:
+                brick = build_bricks(brick_id,  bands='detection')
+
+            # detection
+            brick.detect_sources(band=band, imgtype=imgtype)
+
+            if write:
+                brick.write(allow_update=True)
+
+            return brick
+
+    else:
+        raise RuntimeError('Arguments are overspecified! Either provide brick_id(s) or a brick directly, not both.')
 
 def generate_models(brick_ids=None, group_ids=None, bands=conf.MODEL_BANDS, imgtype='science'):
     # get bricks with 'brick_ids' for 'bands'
@@ -293,11 +312,12 @@ def photometer(brick_ids=None, group_ids=None, bands=None, imgtype='science'):
     if np.isscalar(brick_ids):
         return brick
 
-def quick_group(brick_id=1, group_id=524):
-    try:
-        brick = get_brick(brick_id)
-    except:
-        brick = build_bricks(brick_id)
+def quick_group(brick_id=1, group_id=524, brick=None):
+    if not ((brick is not None) & isinstance(brick, Brick)):
+        try:
+            brick = get_brick(brick_id)
+        except:
+            brick = build_bricks(brick_id)
     brick.detect_sources()
     group = brick.spawn_group(group_id)
     group.determine_models()

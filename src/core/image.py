@@ -1,6 +1,7 @@
 import config as conf
 from .utils import clean_catalog, get_fwhm, get_resolution, reproject_discontinuous, SimpleGalaxy, read_wcs, cumulative, set_priors
 from .utils import recursively_save_dict_contents_to_group, recursively_load_dict_contents_from_group, dcoord_to_offset, get_params
+from .utils import get_detection_kernel
 
 import logging
 import os
@@ -10,6 +11,7 @@ import time
 import h5py
 import copy
 
+from collections import OrderedDict
 import matplotlib
 import matplotlib.pyplot as plt
 from  matplotlib.colors import LogNorm, SymLogNorm, Normalize, ListedColormap, BoundaryNorm
@@ -185,12 +187,7 @@ class BaseImage():
         # Grab the convolution filter
         convfilt = None
         if conf.FILTER_KERNEL is not None:
-            dirname = os.path.dirname(__file__)
-            filename = os.path.join(dirname, '../../config/conv_filters/'+conf.FILTER_KERNEL)
-            if os.path.exists(filename):
-                convfilt = np.array(np.array(ascii.read(filename, data_start=1)).tolist())
-            else:
-                raise FileExistsError(f"Convolution file at {filename} does not exist!")
+            convfilt = get_detection_kernel(conf.FILTER_KERNEL)
 
         # Do the detection
         self.logger.debug(f'Detection will be performed with thresh = {conf.THRESH}')
@@ -198,6 +195,7 @@ class BaseImage():
                 filter_type=conf.FILTER_TYPE, segmentation_map=True, 
                 clean = conf.CLEAN, clean_param = conf.CLEAN_PARAM,
                 deblend_nthresh=conf.DEBLEND_NTHRESH, deblend_cont=conf.DEBLEND_CONT)
+        sep.set_extract_pixstack(conf.PIXSTACK_SIZE)
         tstart = time.time()
         catalog, segmap = sep.extract(image-background, conf.THRESH, **kwargs)
         self.logger.info(f'Detection found {len(catalog)} sources. ({time.time()-tstart:2.2}s)')
@@ -736,7 +734,6 @@ class BaseImage():
                 groupmap = self.get_image('groupmap', band)
                 segmap = self.get_image('segmap', band)
                 chi = self.get_image('chi', band=band)[groupmap==self.group_id].flatten()
-                print('Foooooooooo', band, np.sum(chi.flatten()))
                 totchi += list(chi)
                 chi2, chi_pc = np.sum(chi**2), np.nanpercentile(chi, q=q_pc)
                 if np.isscalar(chi_pc):
@@ -1056,7 +1053,7 @@ class BaseImage():
 
                 if imgtype in ('science', 'model', 'residual', 'chi'):
                     # log-scaled
-                    vmax, rms = np.nanmax(image), self.get_property('rms', band=band)
+                    vmax, rms = np.nanmax(image), self.get_property('clipped_rms', band=band)
                     if vmax < rms:
                         vmax = 3*rms
                     norm = LogNorm(rms, vmax)
@@ -1118,7 +1115,7 @@ class BaseImage():
                     fig = plt.figure(figsize=(20,20))
                     ax = fig.add_subplot(projection=self.get_wcs(band))
                     ax.set_title(f'{band} {imgtype} {tag}')
-                    options = dict(cmap='RdGy', vmin=-5*self.get_property('rms', band=band), vmax=5*self.get_property('rms', band=band))
+                    options = dict(cmap='RdGy', vmin=-5*self.get_property('clipped_rms', band=band), vmax=5*self.get_property('clipped_rms', band=band))
                     im = ax.imshow(image - background, **options)
                     fig.colorbar(im, orientation="horizontal", pad=0.2)
                     if self.type == 'brick':
@@ -1392,7 +1389,7 @@ class BaseImage():
                 if not np.isscalar(background):
                     background = background   #[src]
                 img -= background
-                rms = self.get_property('rms', band=band)
+                rms = self.get_property('clipped_rms', band=band)
                 vmax = np.nanmax(img)
                 vmin = self.get_property('median', band=band)
                 axes[0,0].imshow(img, cmap='RdGy', norm=SymLogNorm(rms, 0.5, -vmax, vmax), extent=extent)
@@ -1469,7 +1466,7 @@ class BaseImage():
                     if self.get_property('subtract_background', band='detection'):
                         background = self.get_background(band)
                     img -= background
-                    srms = self.get_property('rms', band='detection')
+                    srms = self.get_property('clipped_rms', band='detection')
                     svmax = np.nanmax(img)
                     axes[0,3].imshow(img, cmap='RdGy', norm=SymLogNorm(srms, 0.5, -svmax, svmax), extent=extent)
                     axes[0,3].text(0.05, 0.90, 'detection', transform=axes[0,3].transAxes, fontweight='bold')
@@ -1735,13 +1732,21 @@ class BaseImage():
             filename = self.filename
             self.write_hdf5(allow_update=allow_update, filename=filename)
             self.write_fits(allow_update=allow_update, filename=filename.replace('.h5', '.fits'))
-            self.write_catalog(allow_update=allow_update, filename=filename.replace('.h5', '.cat'))
+            if bool(self.catalogs):
+                if np.sum([bool(self.catalogs[key]) for key in self.catalogs]) > 1:
+                    self.write_catalog(allow_update=allow_update, filename=filename.replace('.h5', '.cat'))
         elif filetype == 'hdf5':
             self.write_hdf5(allow_update=allow_update, filename=filename)
         elif filetype == 'fits':
             self.write_fits(allow_update=allow_update, filename=filename.replace('.h5', '.fits'))
         elif filetype == 'cat':
-            self.write_catalog(allow_update=allow_update, filename=filename.replace('.h5', '.cat'))
+            if bool(self.catalogs):
+                if np.sum([bool(self.catalogs[key]) for key in self.catalogs]) > 1:
+                    self.write_catalog(allow_update=allow_update, filename=filename.replace('.h5', '.cat'))
+                else:
+                    raise RuntimeError('Cannot write catalogs to disk as none are present!')
+            else:
+                raise RuntimeError('Cannot write catalogs to disk as none are present!')
 
     def write_fits(self, allow_update=False, filename=None, directory=conf.PATH_BRICKS):
         if filename is None:
@@ -1762,6 +1767,7 @@ class BaseImage():
         
         self.logger.debug(f'... adding data to fits')
         for band in self.data:
+            print(band, self.data[band])
             for attr in self.data[band]:
                 if attr == 'psfmodel':
                     continue

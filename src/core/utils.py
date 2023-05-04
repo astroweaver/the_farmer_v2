@@ -17,10 +17,11 @@ from tractor.psfex import PixelizedPsfEx, PixelizedPSF #PsfExModel
 # from tractor.psf import HybridPixelizedPSF
 from tractor.galaxy import ExpGalaxy, FracDev
 from tractor import PointSource, DevGalaxy, EllipseE, FixedCompositeGalaxy, Fluxes
-# from astrometry.util.util import Tan
+from astrometry.util.util import Tan
 from tractor import ConstantFitsWcs
 
 import time
+from collections import OrderedDict
 from reproject import reproject_interp
 from tqdm import tqdm
 import h5py
@@ -111,7 +112,7 @@ def clean_catalog(catalog, mask, segmap=None):
     if segmap is not None:
         assert(mask.shape == segmap.shape, f'Mask {mask.shape} is not the same shape as the segmentation map {segmap.shape}!')
     zero_seg = np.sum(segmap==0)
-    logger.debug('Cleaning catalog using mask provided')
+    logger.debug('Cleaning catalog...')
     tstart = time.time()
 
     # map the pixel coordinates to the map
@@ -180,6 +181,7 @@ def dilate_and_group(catalog, segmap, radius=0, fill_holes=False):
     return group_ids, group_pops, groupmap
 
 def get_fwhm(img):
+    # super dirty!
     dx, dy = np.nonzero(img > np.nanmax(img)/2.)
     try:
         fwhm = np.mean([dx[-1] - dx[0], dy[-1] - dy[0]])
@@ -352,7 +354,7 @@ def reproject_discontinuous(input, out_wcs, out_shape, thresh=0.1):
     return outarray
     
 
-def recursively_save_dict_contents_to_group( h5file, dic, path='/'):
+def recursively_save_dict_contents_to_group(h5file, dic, path='/'):
 
     logger = logging.getLogger('farmer.hdf5')
 
@@ -379,7 +381,7 @@ def recursively_save_dict_contents_to_group( h5file, dic, path='/'):
                 item = np.array([i.to(u.deg).value for i in item])
             #print(item)
         # save strings, numpy.int64, and numpy.float64 types
-        if isinstance(item, (np.int32, np.int64, np.float64, str, np.float, float, np.float32, int)):
+        if isinstance(item, (np.int32, np.int64, np.float64, str, float, np.float32, int)):
             h5file[path].attrs[key]= item
             # print(h5file[path+key].value)
             # if not h5file[path + key][...] == item:
@@ -398,7 +400,7 @@ def recursively_save_dict_contents_to_group( h5file, dic, path='/'):
         elif isinstance(item, fits.header.Header):
             h5file[path].attrs[key] = item.tostring()
         elif isinstance(item, np.ndarray):
-            if (key == 'bands') & np.isscalar(item):
+            if (key == 'bands'): # & np.isscalar(item):
                 item = np.array(item).astype('|S9')
                 try:
                     h5file[path].create_dataset(key, data=item)
@@ -406,13 +408,13 @@ def recursively_save_dict_contents_to_group( h5file, dic, path='/'):
                     if item[0] not in h5file[path][key][...]:
                         values = h5file[path][key][...].tolist()
                         values.append(item[0])
-                        print(values, type(values))
                         item = np.array(values)
                         del h5file[path][key]
                         h5file[path].create_dataset(key, data=item)
             else:
                 try:
                     try:
+                        print(path, key, item)
                         h5file[path].create_dataset(key, data=item)
                     except:
                         h5file[path][key][...] = item
@@ -450,6 +452,13 @@ def recursively_load_dict_contents_from_group(h5file, path='/', ans=None):
     # return h5file[path]
     if ans is None:
         ans = {}
+    if path == '/':
+        for attr in h5file.attrs:
+            value = h5file.attrs[attr]
+            if attr == 'position':
+                ans[attr] = SkyCoord(value, unit=u.deg)
+            else:
+                ans[attr] = value
     for key, item in h5file[path].items():
         try:
             key = int(key)
@@ -488,8 +497,8 @@ def recursively_load_dict_contents_from_group(h5file, path='/', ans=None):
                         logger.debug(f'          * {key2}')
                         if key2 != 'wcs':
                             ans[key].__dict__[key2] = item.attrs[key2]
-                else:
-                    ans[key] = item[...]
+                # else:
+                #     ans[key] = item[...]
 
             elif ('model' in item.name) & ('modeltype' in item.attrs):
                 modeltype = item.attrs['modeltype']
@@ -694,3 +703,41 @@ def set_priors(model, priors):
                 else:
                     logger.debug('Radius is free to vary')             
     return model
+
+def get_detection_kernel(filter_kernel):
+    kernel_kwargs = {}
+    # if string, grab from config
+    if isinstance(filter_kernel, str):
+        dirname = os.path.dirname(__file__)
+        filename = os.path.join(dirname, '../../config/conv_filters/'+conf.FILTER_KERNEL)
+        if os.path.exists(filename):
+            convfilt = np.array(np.array(ascii.read(filename, data_start=1)).tolist())
+        else:
+            raise FileExistsError(f"Convolution file at {filename} does not exist!")
+        return convfilt
+
+    elif np.isscalar(filter_kernel):
+        from astropy.convolution import Gaussian2DKernel
+        # else, assume FWHM in pixels
+        kernel_kwargs['x_stddev'] = filter_kernel/2.35
+        kernel_kwargs['factor']=1
+        convfilt = np.array(Gaussian2DKernel(**kernel_kwargs))
+        return convfilt
+    
+    else:
+        raise RuntimeError(f'Requested kernel {filter_kernel} not understood!')
+
+def build_regions(catalog, pixel_scale, outpath='objects.reg', scale_factor=2.0):
+    from regions import EllipseSkyRegion, Regions
+    detcoords = SkyCoord(catalog['ra'], catalog['dec'])
+    regs = []
+    for coord, obj in tqdm(zip(detcoords, catalog), total=len(catalog)):
+        width = scale_factor * 2 * obj['a'] * pixel_scale
+        height = scale_factor * 2 * obj['b'] * pixel_scale
+        angle = np.rad2deg(obj['theta']) * u.deg
+        objid = str(obj['ID'])
+        regs.append(EllipseSkyRegion(coord, width, height, angle, meta={'text':objid}))
+    regs = np.array(regs)
+    bigreg = Regions(regs)
+    bigreg.write(outpath, overwrite=True, format='ds9')
+

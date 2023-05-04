@@ -1,7 +1,7 @@
 from collections import OrderedDict
 import config as conf
 from .image import BaseImage
-from .utils import get_brick_position, dilate_and_group, clean_catalog
+from .utils import get_brick_position, dilate_and_group, clean_catalog, build_regions
 from .group import Group
 
 import logging
@@ -16,6 +16,11 @@ from copy import copy
 
 class Brick(BaseImage):
     def __init__(self, brick_id=None, position=None, size=None, load=True) -> None:
+
+
+        if not np.isscalar(brick_id):
+            if len(brick_id) == 1:
+                brick_id = brick_id[0]
         
         self.filename = f'B{brick_id}.h5'
         self.logger = logging.getLogger(f'farmer.brick_{brick_id}')
@@ -149,8 +154,9 @@ class Brick(BaseImage):
 
 
         # get background info if backregion is 'brick' -- WILL overwrite inhereted info if it exists...
-        if self.properties[mosaic.band]['backregion'] == 'brick':
-            self.estimate_background(band=mosaic.band, imgtype='science')
+        if 'backregion' in self.properties[mosaic.band]:
+            if self.properties[mosaic.band]['backregion'] == 'brick':
+                self.estimate_background(band=mosaic.band, imgtype='science')
         
         
         # TODO -- should be able to INHERET catalogs from the parent mosaic, if they exist!
@@ -165,8 +171,10 @@ class Brick(BaseImage):
         cutout = Cutout2D(self.data[band][imgtype].data, self.position, self.size[::-1], wcs=self.data[band][imgtype].wcs)
         mask = Cutout2D(np.zeros(cutout.data.shape), self.position, self.buffsize[::-1], wcs=cutout.wcs, fill_value=1, mode='partial').data.astype(bool)
         segmap = Cutout2D(segmap, self.position, self.buffsize[::-1], self.wcs[band], fill_value=0, mode='partial')
-        catalog, segmap.data = clean_catalog(catalog, mask, segmap=segmap.data)
-        mask[mask & (segmap.data>0)] = False
+        # do I actually need to do this?
+        if np.any(mask):
+            catalog, segmap.data = clean_catalog(catalog, mask, segmap=segmap.data)
+            mask[mask & (segmap.data>0)] = False
 
         # save stuff
         self.catalogs[band][imgtype] = catalog
@@ -184,6 +192,10 @@ class Brick(BaseImage):
         skycoords = self.data[band][imgtype].wcs.all_pix2world(catalog['x'], catalog['y'], 0)
         self.catalogs[band][imgtype].add_column(skycoords[0]*u.deg, name=f'ra', index=1, )
         self.catalogs[band][imgtype].add_column(skycoords[1]*u.deg, name=f'dec', index=2)
+
+        # generate regions file
+        build_regions(self.catalogs[band][imgtype], self.pixel_scales[band][0], # you better have square pixels!
+                      outpath = os.path.join(conf.PATH_ANCILLARY, f'B{self.brick_id}_{band}_{imgtype}_objects.reg'))
 
 
     def identify_groups(self, band='detection', imgtype='science', radius=conf.DILATION_RADIUS):
