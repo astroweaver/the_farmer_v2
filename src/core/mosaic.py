@@ -11,6 +11,12 @@ from astropy.nddata import Cutout2D
 import astropy.units as u
 import numpy as np
 
+default_properties = {}
+default_properties['psfmodel_type'] = 'constant'
+default_properties['subtract_background'] = False
+default_properties['backtype'] = 'flat'
+default_properties['backregion'] = 'mosaic'
+default_properties['zeropoint'] = -99
 
 class Mosaic(BaseImage):
     def __init__(self, band, load=False) -> None:
@@ -35,6 +41,11 @@ class Mosaic(BaseImage):
                 self.properties = conf.DETECTION
             else:
                 self.properties = conf.BANDS[band]
+            for key in default_properties:
+                if key not in self.properties:
+                    self.properties[key] = default_properties[key]
+            if 'name' not in self.properties:
+                self.properties['name'] = band
             good = '✓'
             bad = 'X'
             # verify the band

@@ -128,29 +128,33 @@ class Brick(BaseImage):
                 self.logger.debug(f'... data \"{imgtype}\" adopted from mosaic')
 
         # if weights or masks dont exist, make them as dummy arrays
-        weight = np.ones_like(mosaic.data['science']) # big, but OK...
-        cutout = Cutout2D(weight, self.position, self.buffsize[::-1], wcs=mosaic.wcs, mode='partial', fill_value = np.nan)
-        self.logger.debug(f'... data \"weight\" subimage generated as ones at {cutout.input_position_original}')
-        self.data[mosaic.band]['weight'] = cutout
-        self.headers[mosaic.band]['weight'] = self.headers[mosaic.band]['science']
+        if 'weight' not in self.data[mosaic.band]:
+            weight = np.ones_like(mosaic.data['science']) # big, but OK...
+            cutout = Cutout2D(weight, self.position, self.buffsize[::-1], wcs=mosaic.wcs, mode='partial', fill_value = np.nan)
+            self.logger.debug(f'... data \"weight\" subimage generated as ones at {cutout.input_position_original}')
+            self.data[mosaic.band]['weight'] = cutout
+            self.headers[mosaic.band]['weight'] = self.headers[mosaic.band]['science']
 
-        mask = np.zeros_like(mosaic.data['science']).astype(bool) # big, but OK...
-        cutout = Cutout2D(mask, self.position, self.buffsize[::-1], wcs=mosaic.wcs, mode='partial', fill_value = True)
-        self.logger.debug(f'... data \"mask\" subimage generated as ones at {cutout.input_position_original}')
-        self.data[mosaic.band]['mask'] = cutout
-        self.headers[mosaic.band]['mask'] = self.headers[mosaic.band]['science']
+        if 'mask' not in self.data[mosaic.band]:
+            mask = np.zeros_like(mosaic.data['science']).astype(bool) # big, but OK...
+            cutout = Cutout2D(mask, self.position, self.buffsize[::-1], wcs=mosaic.wcs, mode='partial', fill_value = True)
+            self.logger.debug(f'... data \"mask\" subimage generated as ones at {cutout.input_position_original}')
+            self.data[mosaic.band]['mask'] = cutout
+            self.headers[mosaic.band]['mask'] = self.headers[mosaic.band]['science']
 
-        background = np.zeros_like(mosaic.data['science']) # big, but OK...
-        cutout = Cutout2D(background, self.position, self.buffsize[::-1], wcs=mosaic.wcs, mode='partial', fill_value = np.nan)
-        self.logger.debug(f'... data \"background\" subimage generated as ones at {cutout.input_position_original}')
-        self.data[mosaic.band]['background'] = cutout
-        self.headers[mosaic.band]['background'] = self.headers[mosaic.band]['science']
+        if 'background' not in self.data[mosaic.band]:
+            background = np.zeros_like(mosaic.data['science']) # big, but OK...
+            cutout = Cutout2D(background, self.position, self.buffsize[::-1], wcs=mosaic.wcs, mode='partial', fill_value = np.nan)
+            self.logger.debug(f'... data \"background\" subimage generated as ones at {cutout.input_position_original}')
+            self.data[mosaic.band]['background'] = cutout
+            self.headers[mosaic.band]['background'] = self.headers[mosaic.band]['science']
 
-        rms = np.zeros_like(mosaic.data['science']) # big, but OK...
-        cutout = Cutout2D(rms, self.position, self.buffsize[::-1], wcs=mosaic.wcs, mode='partial', fill_value = np.nan)
-        self.logger.debug(f'... data \"rms\" subimage generated as ones at {cutout.input_position_original}')
-        self.data[mosaic.band]['rms'] = cutout
-        self.headers[mosaic.band]['rms'] = self.headers[mosaic.band]['science']
+        if 'rms' not in self.data[mosaic.band]:
+            rms = np.zeros_like(mosaic.data['science']) # big, but OK...
+            cutout = Cutout2D(rms, self.position, self.buffsize[::-1], wcs=mosaic.wcs, mode='partial', fill_value = np.nan)
+            self.logger.debug(f'... data \"rms\" subimage generated as ones at {cutout.input_position_original}')
+            self.data[mosaic.band]['rms'] = cutout
+            self.headers[mosaic.band]['rms'] = self.headers[mosaic.band]['science']
 
 
         # get background info if backregion is 'brick' -- WILL overwrite inhereted info if it exists...

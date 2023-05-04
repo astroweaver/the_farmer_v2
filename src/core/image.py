@@ -99,13 +99,19 @@ class BaseImage():
         self.logger.debug(f'Getting {imgtype} image for {band}')# ( {tsum:2.2f} / {mean:2.2f} / {med:2.2f} / {std:2.2f} )')
         return image
 
-    def get_psfmodel(self, band=None):
+    def get_psfmodel(self, band=None, normalization=None): # TODO NEEDS WORK!
 
         if self.type == 'mosaic':
-            return self.data['psfmodel']
-
+            psfmodel = self.data['psfmodel'].copy()
         else:
-            return self.data[band]['psfmodel']
+            psfmodel = self.data[band]['psfmodel'].copy()
+            
+        # if normalization is None:
+        psfmodel -= np.median(psfmodel[:10, :10])
+        psfmodel[psfmodel<1e-31] = 1e-31
+        psfmodel /= np.sum(psfmodel)
+            
+        return psfmodel
 
     def set_image(self, image, imgtype=None, band=None):
         if self.type == 'mosaic':
@@ -272,7 +278,10 @@ class BaseImage():
 
         self.logger.debug(f'Staging images for The Tractor... (image --> {data_imgtype})')
         for band in bands:
-            psfmodel = PixelizedPSF(self.data[band]['psfmodel'])
+            psfmodel = PixelizedPSF(self.get_psfmodel(band=band))
+            # from tractor.psf import NCircularGaussianPSF
+            # psfmodel = NCircularGaussianPSF([5.], [1.])
+            # psfmodel.img = np.ones((100, 100))
 
             data = self.get_image(band=band, imgtype=data_imgtype)
             data[np.isnan(data)] = 0
@@ -697,7 +706,7 @@ class BaseImage():
                             continue
 
                         if np.argmin(chi2) == 4:
-                            self.model_catalog[source_id] = PointSource(None, None, None, None, None)
+                            self.model_catalog[source_id] = FixedCompositeGalaxy(None, None, None, None, None)
                             self.solved[i] = True
                             self.logger.debug(f' Source #{source_id} ... solved as CompositeGalaxy')
                             continue
@@ -1622,7 +1631,8 @@ class BaseImage():
                 # weight image
                 img = self.get_image('weight', band=band).copy()   #[src]
                 vmax = np.max(img)
-                axes[2,0].imshow(img, cmap='Greys', norm=Normalize(0, vmax), extent=extent)
+                vmax = np.min(img)
+                axes[2,0].imshow(img, cmap='Greys', norm=Normalize(vmin, vmax), extent=extent)
                 axes[2,0].text(0.05, 0.90, 'Weight', transform=axes[2,0].transAxes, fontweight='bold')
                 axes[2,0].axhline(dims[1] * (-4/10.), xmin, xmax, c='k')
                 axes[2,0].text(target_center, 0.12, f'{target_scale}\"', transform=axes[2,0].transAxes, fontweight='bold', horizontalalignment='center')

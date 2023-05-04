@@ -95,7 +95,9 @@ class Group(BaseImage):
             print()
             print(f' --- Data {band} ---')
             for imgtype in self.data[band].keys():
-                img = self.data[band][imgtype].data
+                img = np.copy(self.data[band][imgtype].data)
+                if imgtype == 'weight':
+                    img = img[img>0]
                 tsum, mean, med, std = np.nansum(img), np.nanmean(img), np.nanmedian(img), np.nanstd(img)
                 print(f'  {imgtype} ... {np.shape(img)} ( {tsum:2.2f} / {mean:2.2f} / {med:2.2f} / {std:2.2f})')
             # print(f'--- Properties {band} ---')
@@ -148,7 +150,6 @@ class Group(BaseImage):
                     if imgtype == 'science':
                         self.wcs[band] = cutout.wcs
                 else:
-                    print(band, imgtype)
                     self.data[band][imgtype] = brick.data[band][imgtype].copy()
                     self.logger.debug(f'... data \"{imgtype}\" adopted from brick')
 
