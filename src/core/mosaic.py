@@ -10,6 +10,7 @@ from astropy.io import fits
 from astropy.nddata import Cutout2D
 import astropy.units as u
 import numpy as np
+from astropy.wcs.utils import proj_plane_pixel_scales
 
 default_properties = {}
 default_properties['psfmodel_type'] = 'constant'
@@ -81,7 +82,7 @@ class Mosaic(BaseImage):
             wcs_status = bad
             try:
                 self.wcs = WCS(fits.getheader(self.properties['science']))
-                self.pixel_scale = self.wcs.proj_plane_pixel_scales()
+                self.pixel_scale = proj_plane_pixel_scales(self.wcs)
                 wcs_status = good
             except:
                 raise RuntimeError(f'The World Coordinate System for {band} cannot be understood!')

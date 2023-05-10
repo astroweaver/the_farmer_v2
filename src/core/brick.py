@@ -11,7 +11,7 @@ import astropy.units as u
 import numpy as np
 from pathos.pools import ProcessPool
 from copy import copy
-
+from astropy.wcs.utils import proj_plane_pixel_scales
 
 
 class Brick(BaseImage):
@@ -121,7 +121,7 @@ class Brick(BaseImage):
                     self.headers[mosaic.band][imgtype] = mosaic.headers[imgtype] #TODO update WCS!
                 if imgtype == 'science':
                     self.wcs[mosaic.band] = cutout.wcs
-                    self.pixel_scales[mosaic.band] = cutout.wcs.proj_plane_pixel_scales()
+                    self.pixel_scales[mosaic.band] = proj_plane_pixel_scales(cutout.wcs)
                     self.estimate_properties(band=mosaic.band, imgtype=imgtype)
             else:
                 self.data[mosaic.band][imgtype] = mosaic.data[imgtype]
