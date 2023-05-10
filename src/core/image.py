@@ -1277,7 +1277,7 @@ class BaseImage():
             outname = os.path.join(conf.PATH_FIGURES, fnsrc + self.filename.replace('.h5', '_summary.pdf'))
             pdf = matplotlib.backends.backend_pdf.PdfPages(outname)
 
-            for band in bands:
+            for band in self.model_tracker[source_id][stage].keys():
 
                 bandname = 'detection'
                 if band != 'detection':
