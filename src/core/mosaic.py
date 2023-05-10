@@ -83,6 +83,10 @@ class Mosaic(BaseImage):
             try:
                 self.wcs = WCS(fits.getheader(self.properties['science']))
                 self.pixel_scale = proj_plane_pixel_scales(self.wcs)
+                try:
+                    self.pixel_scale[0].unit
+                except:
+                    self.pixel_scale[0].unit = u.arcsec
                 wcs_status = good
             except:
                 raise RuntimeError(f'The World Coordinate System for {band} cannot be understood!')

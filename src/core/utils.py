@@ -732,8 +732,8 @@ def build_regions(catalog, pixel_scale, outpath='objects.reg', scale_factor=2.0)
     detcoords = SkyCoord(catalog['ra'], catalog['dec'])
     regs = []
     for coord, obj in tqdm(zip(detcoords, catalog), total=len(catalog)):
-        width = scale_factor * 2 * obj['a'] * pixel_scale * u.arcsec
-        height = scale_factor * 2 * obj['b'] * pixel_scale * u.arcsec
+        width = scale_factor * 2 * obj['a'] * pixel_scale
+        height = scale_factor * 2 * obj['b'] * pixel_scale
         angle = np.rad2deg(obj['theta']) * u.deg
         objid = str(obj['ID'])
         regs.append(EllipseSkyRegion(coord, width, height, angle, meta={'text':objid}))
