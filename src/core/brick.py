@@ -121,7 +121,7 @@ class Brick(BaseImage):
                     self.headers[mosaic.band][imgtype] = mosaic.headers[imgtype] #TODO update WCS!
                 if imgtype == 'science':
                     self.wcs[mosaic.band] = cutout.wcs
-                    self.pixel_scales[mosaic.band] = proj_plane_pixel_scales(cutout.wcs)
+                    self.pixel_scales[mosaic.band] = proj_plane_pixel_scales(cutout.wcs) * u.deg
                     self.estimate_properties(band=mosaic.band, imgtype=imgtype)
             else:
                 self.data[mosaic.band][imgtype] = mosaic.data[imgtype]
