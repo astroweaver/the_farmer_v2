@@ -1161,7 +1161,7 @@ class BaseImage():
                     fig.tight_layout()
                 
                 if imgtype in ('weight', 'mask'):
-                    options = dict(cmap='Greys', vmin=np.min(image), vmax=np.max(image))
+                    options = dict(cmap='Greys', vmin=np.nanmin(image), vmax=np.nanmax(image))
                     im = ax.imshow(image, **options)
                     fig.colorbar(im, orientation="horizontal", pad=0.2)
                     if show_catalog & (catalog_band in self.catalogs.keys()):
