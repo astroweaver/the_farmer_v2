@@ -91,7 +91,7 @@ class Mosaic(BaseImage):
             self.center = self.wcs.pixel_to_world(arr_shape[0]/2., arr_shape[1]/2.)
             upper = self.wcs.pixel_to_world(arr_shape[0], arr_shape[1])
             lower = self.wcs.pixel_to_world(0, 0)
-            self.size = (lower.ra - upper.ra), (upper.dec - lower.dec)
+            self.size = arr_shape * self.pixel_scale
             
             self.logger.debug(f'Mosaic {band} is centered at {self.center.ra:2.1f}, {self.center.dec:2.1f}')
             self.logger.debug(f'Mosaic {band} has size at {self.size[0]:2.1f}, {self.size[1]:2.1f}')
