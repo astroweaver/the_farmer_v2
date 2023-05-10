@@ -86,7 +86,7 @@ class Mosaic(BaseImage):
                 try:
                     self.pixel_scale[0].unit
                 except:
-                    self.pixel_scale[0].unit = u.arcsec
+                    self.pixel_scale *= u.deg
                 wcs_status = good
             except:
                 raise RuntimeError(f'The World Coordinate System for {band} cannot be understood!')
