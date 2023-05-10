@@ -1631,8 +1631,8 @@ class BaseImage():
 
                 # weight image
                 img = self.get_image('weight', band=band).copy()   #[src]
-                vmax = np.max(img)
-                vmax = np.min(img)
+                vmax = np.nanmax(img)
+                vmax = np.nanmin(img)
                 axes[2,0].imshow(img, cmap='Greys', norm=Normalize(vmin, vmax), extent=extent)
                 axes[2,0].text(0.05, 0.90, 'Weight', transform=axes[2,0].transAxes, fontweight='bold')
                 axes[2,0].axhline(dims[1] * (-4/10.), xmin, xmax, c='k')
