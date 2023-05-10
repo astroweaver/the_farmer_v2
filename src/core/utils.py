@@ -3,7 +3,7 @@ import os
 import logging
 
 import numpy as np
-from astropy.io import fits
+from astropy.io import fits, ascii
 from astropy.table import Table
 from astropy.coordinates import SkyCoord
 from scipy.ndimage import label, binary_dilation, binary_erosion, binary_fill_holes
