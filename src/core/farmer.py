@@ -190,7 +190,7 @@ def update_bricks(brick_ids=None, bands=None):
 
 def detect_sources(brick_ids=None, band='detection', imgtype='science', brick=None, write=False):
 
-    if brick_id is None and brick is not None:
+    if brick_ids is None and brick is not None:
         # run the brick given directly
         # This can also be run by brick.detect_sources, but we also write it out if asked for!
         brick.detect_sources(band=band, imgtype=imgtype)
@@ -200,7 +200,7 @@ def detect_sources(brick_ids=None, band='detection', imgtype='science', brick=No
 
         return brick
 
-    elif brick_id is not None and brick is None:
+    elif brick_ids is not None and brick is None:
         # run the brick(s) asked for
 
         # Generate brick_ids
