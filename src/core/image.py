@@ -1458,7 +1458,7 @@ class BaseImage():
                     
                     for ax in (axes[0,0], axes[0,3]):
                         ax.scatter(xc, yc, color=cmap(i), marker='+')
-                        ax.annotate(int(sid), (xc, yc), (xc-0.1, yc-0.1), c=cmap(i), horizontalalignment='right', verticalalignment='top')
+                        ax.annotate(int(sid), (xc, yc), (xc-0.1, yc-0.1), color=cmap(i), horizontalalignment='right', verticalalignment='top')
                     for ax in axes[1:3,:].flatten():
                         ax.scatter(xc, yc, color=cmap(i), marker='+')
 
