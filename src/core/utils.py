@@ -577,9 +577,9 @@ def get_params(model):
             source[f'total.{stat}'] = model.statistics[stat]
 
     # shape
-    if isinstance(model, (ExpGalaxy, DevGalaxy)) & ~(model.getSourceType() != 'SimpleGalaxy'):
-        print(model)
-        print(model.shape)
+    if model.name == 'SimpleGalaxy': # this is stupid for stupid reasons.
+        pass
+    elif isinstance(model, (ExpGalaxy, DevGalaxy)):
         source['logre'] = model.shape.logre # log(arcsec)
         source['logre.err'] = np.sqrt(model.variance.shape.logre)
         source['ellip'] = model.shape.e
