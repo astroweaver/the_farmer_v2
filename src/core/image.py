@@ -584,8 +584,8 @@ class BaseImage():
 
                 # After stage 2, compare PS(1) to SG(2)
                 if self.stage == 2:
-                    ps_chi2 = self.model_tracker[source_id][1]['rchisq']
-                    sg_chi2 = self.model_tracker[source_id][2]['rchisq']
+                    ps_chi2 = self.model_tracker[source_id][1]['total']['rchisq']
+                    sg_chi2 = self.model_tracker[source_id][2]['total']['rchisq']
 
                     if (ps_chi2 > conf.SUFFICIENT_THRESH) & (sg_chi2 > conf.SUFFICIENT_THRESH): # neither win
                         self.model_catalog[source_id] = ExpGalaxy(None, None, None)
@@ -618,10 +618,10 @@ class BaseImage():
 
                 # After stage 4, compare EXP(3) to DEV(4)
                 if self.stage == 4:
-                    ps_chi2 = self.model_tracker[source_id][1]['rchisq']
-                    sg_chi2 = self.model_tracker[source_id][2]['rchisq']
-                    exp_chi2 = self.model_tracker[source_id][3]['rchisq']
-                    dev_chi2 = self.model_tracker[source_id][4]['rchisq']
+                    ps_chi2 = self.model_tracker[source_id][1]['total']['rchisq']
+                    sg_chi2 = self.model_tracker[source_id][2]['total']['rchisq']
+                    exp_chi2 = self.model_tracker[source_id][3]['total']['rchisq']
+                    dev_chi2 = self.model_tracker[source_id][4]['total']['rchisq']
 
                     if (exp_chi2 > conf.SUFFICIENT_THRESH) & (dev_chi2 > conf.SUFFICIENT_THRESH): # neither win
                         self.model_catalog[source_id] = FixedCompositeGalaxy(None, None, None, None, None)
@@ -653,9 +653,9 @@ class BaseImage():
 
                 # After stage 5, check exp and dev
                 if self.stage == 5:
-                    exp_chi2 = self.model_tracker[source_id][3]['rchisq']
-                    dev_chi2 = self.model_tracker[source_id][4]['rchisq']
-                    comp_chi2 = self.model_tracker[source_id][5]['rchisq']
+                    exp_chi2 = self.model_tracker[source_id][3]['total']['rchisq']
+                    dev_chi2 = self.model_tracker[source_id][4]['total']['rchisq']
+                    comp_chi2 = self.model_tracker[source_id][5]['total']['rchisq']
 
                     if (exp_chi2 <= comp_chi2) & (exp_chi2 <= conf.SUFFICIENT_THRESH): # exp wins
                         self.model_catalog[source_id] = ExpGalaxy(None, None, None)
@@ -676,8 +676,8 @@ class BaseImage():
                         continue
 
                     else: # wow that thing is crap. Pick the lowest chi2
-                        ps_chi2 = self.model_tracker[source_id][1]['rchisq']
-                        sg_chi2 = self.model_tracker[source_id][2]['rchisq']
+                        ps_chi2 = self.model_tracker[source_id][1]['total']['rchisq']
+                        sg_chi2 = self.model_tracker[source_id][2]['total']['rchisq']
                         chi2 = np.array([ps_chi2, sg_chi2, exp_chi2, dev_chi2, comp_chi2])
 
                         if np.argmin(chi2) == 0:
@@ -782,7 +782,7 @@ class BaseImage():
                     self.model_tracker[self.type][stage][band]['rchisq'] = chi2 /ndof
                     self.model_tracker[self.type][stage][band]['rchisqmodel'] = rchi2_model
                     for pc, chi_npc in zip(q_pc, chi_pc):
-                        self.model_tracker[self.type][stage][band][f'chi_pc{pc}'] = chi_npc
+                        self.model_tracker[self.type][stage][band][f'chi_pc{pc:02d}'] = chi_npc
                     if len(chi) >= 8:
                         self.model_tracker[self.type][stage][band]['chi_k2'] = stats.normaltest(chi)[0]
                     else:
@@ -797,20 +797,20 @@ class BaseImage():
                 nparam = 0
             ndof = np.max([len(bands), ntotal_pix - nparam])
             chi2 = np.sum(np.array([self.model_tracker[self.type][stage][band]['chisq'] for band in bands]))
-            self.model_tracker[self.type][stage]['chisq'] = chi2
+            self.model_tracker[self.type][stage]['total']['chisq'] = chi2
             tot_rchi2_model = np.sum(rchi2_model_top) / np.sum(rchi2_model_bot)
-            self.model_tracker[self.type][stage]['rchisqmodel'] = tot_rchi2_model
-            self.model_tracker[self.type][stage]['rchisq'] = chi2 / ndof
+            self.model_tracker[self.type][stage]['total']['rchisqmodel'] = tot_rchi2_model
+            self.model_tracker[self.type][stage]['total']['rchisq'] = chi2 / ndof
             for pc, chi_npc in zip(q_pc, np.nanpercentile(totchi, q=q_pc)):
                 self.model_tracker[self.type][stage][f'chi_pc{pc}'] = chi_npc
             if len(totchi) >= 8:
-                self.model_tracker[self.type][stage]['chi_k2'] = stats.normaltest(totchi)[0]
+                self.model_tracker[self.type][stage]['total']['chi_k2'] = stats.normaltest(totchi)[0]
             else:
-                self.model_tracker[self.type][stage]['chi_k2'] = np.nan
-            self.model_tracker[self.type][stage]['ndata'] = ntotal_pix
-            self.model_tracker[self.type][stage]['nparam'] = nparam
-            self.model_tracker[self.type][stage]['ndof'] = ndof
-            self.model_tracker[self.type][stage]['nres'] = ntotalres_elem
+                self.model_tracker[self.type][stage]['total']['chi_k2'] = np.nan
+            self.model_tracker[self.type][stage]['total']['ndata'] = ntotal_pix
+            self.model_tracker[self.type][stage]['total']['nparam'] = nparam
+            self.model_tracker[self.type][stage]['total']['ndof'] = ndof
+            self.model_tracker[self.type][stage]['total']['nres'] = ntotalres_elem
             self.logger.info(f'   ==> 𝛘2/N = {chi2/ndof:2.2f} ({tot_rchi2_model:2.2f}) | N(data) = {ntotal_pix:2.2f} ({ntotalres_elem:2.2f}) | N(param) = {nparam:2.0f} | N(DOF) = {ndof:2.2f}')
 
         for i, src in enumerate(self.catalogs[self.catalog_band][self.catalog_imgtype]):
@@ -887,20 +887,20 @@ class BaseImage():
                 nparam = 0
             ndof = np.max([len(bands), ntotal_pix - nparam]).astype(np.int32)
             chi2 = np.sum(np.array([self.model_tracker[source_id][stage][band]['chisq'] for band in bands]))
-            self.model_tracker[source_id][stage]['rchisq'] = chi2 / ndof
+            self.model_tracker[source_id][stage]['total']['rchisq'] = chi2 / ndof
             tot_rchi2_model = np.sum(rchi2_model_top) / np.sum(rchi2_model_bot)
-            self.model_tracker[source_id][stage]['rchisqmodel'] = tot_rchi2_model
-            self.model_tracker[source_id][stage]['chisq'] = chi2
+            self.model_tracker[source_id][stage]['total']['rchisqmodel'] = tot_rchi2_model
+            self.model_tracker[source_id][stage]['total']['chisq'] = chi2
             for pc, chi_npc in zip(q_pc, np.nanpercentile(totchi, q=(5, 16, 50, 84, 95))):
-                self.model_tracker[source_id][stage][f'chi_pc{pc}'] = chi_npc
+                self.model_tracker[source_id][stage]['total'][f'chi_pc{pc}'] = chi_npc
             if len(totchi) >= 8:
-                self.model_tracker[source_id][stage]['chi_k2'] = stats.normaltest(totchi)[0]
+                self.model_tracker[source_id][stage]['total']['chi_k2'] = stats.normaltest(totchi)[0]
             else:
-                self.model_tracker[source_id][stage]['chi_k2'] = np.nan
-            self.model_tracker[source_id][stage]['ndata'] = ntotal_pix
-            self.model_tracker[source_id][stage]['nparam'] = nparam
-            self.model_tracker[source_id][stage]['ndof'] = ndof
-            self.model_tracker[source_id][stage]['nres'] = ntotalres_elem
+                self.model_tracker[source_id][stage]['total']['chi_k2'] = np.nan
+            self.model_tracker[source_id][stage]['total']['ndata'] = ntotal_pix
+            self.model_tracker[source_id][stage]['total']['nparam'] = nparam
+            self.model_tracker[source_id][stage]['total']['ndof'] = ndof
+            self.model_tracker[source_id][stage]['total']['nres'] = ntotalres_elem
             self.logger.info(f'   ==> 𝛘2/N = {chi2/ndof:2.2f} ({tot_rchi2_model:2.2f}) | N(data) = {ntotal_pix:2.2f} ({ntotalres_elem:2.2f}) | N(param) = {nparam:2.0f} | N(DOF) = {ndof:2.2f}')
 
     def build_all_images(self, bands=None, source_id=None, overwrite=True):
@@ -1293,7 +1293,7 @@ class BaseImage():
                 if source_id == 'group':
                     axes[0,1].text(0, 1, f'Group #{self.group_id} (Brick #{self.brick_id})', transform=axes[0,1].transAxes) 
                     axes[0,1].text(0, 0.8, f'N = {len(self.source_ids)} sources {self.source_ids}', transform=axes[0,1].transAxes) 
-                    stats = self.model_tracker['group'][stage]
+                    stats = self.model_tracker['group'][stage]['total']
                     axes[0,1].text(0, 0.7, f'Total  $\chi^2_N$ = {stats["rchisq"]:2.2f} ({stats["rchisqmodel"]:2.2f}) N(DOF) = {stats["ndof"]} with {stats["nres"]:2.2f} resolution elements', transform=axes[0,1].transAxes)
                     axes[0,1].text(0, 0.6, f'        <$\chi$> = {stats["chi_pc50"]:2.2f} | $\sigma$($\chi$) = {stats["chi_pc84"] - stats["chi_pc16"]:2.2f} | $K^2$ = {stats["chi_k2"]:2.2f}', transform=axes[0,1].transAxes)
                     stats = self.model_tracker['group'][stage][band]
@@ -1304,7 +1304,7 @@ class BaseImage():
                     model = self.model_tracker[source_id][stage]['model']
                     axes[0,1].text(0, 1, f'Source #{source_id} (Group #{self.group_id}, Brick #{self.brick_id})', transform=axes[0,1].transAxes)
                     axes[0,1].text(0, 0.8, f'Model type: {model.name}', transform=axes[0,1].transAxes)
-                    stats = self.model_tracker[source_id][stage]
+                    stats = self.model_tracker[source_id][stage]['total']
                     axes[0,1].text(0, 0.7, f'Total  $\chi^2_N$ = {stats["rchisq"]:2.2f} ({stats["rchisqmodel"]:2.2f}) N(DOF) = {stats["ndof"]} with {stats["nres"]:2.2f} resolution elements', transform=axes[0,1].transAxes)
                     axes[0,1].text(0, 0.6, f'        <$\chi$> = {stats["chi_pc50"]:2.2f} | $\sigma$($\chi$) = {stats["chi_pc84"] - stats["chi_pc16"]:2.2f} | $K^2$ = {stats["chi_k2"]:2.2f}', transform=axes[0,1].transAxes)
                     stats = self.model_tracker[source_id][stage][band]
