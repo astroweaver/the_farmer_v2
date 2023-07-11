@@ -797,6 +797,7 @@ class BaseImage():
                 nparam = 0
             ndof = np.max([len(bands), ntotal_pix - nparam])
             chi2 = np.sum(np.array([self.model_tracker[self.type][stage][band]['chisq'] for band in bands]))
+            self.model_tracker[self.type][stage]['total'] = {}
             self.model_tracker[self.type][stage]['total']['chisq'] = chi2
             tot_rchi2_model = np.sum(rchi2_model_top) / np.sum(rchi2_model_bot)
             self.model_tracker[self.type][stage]['total']['rchisqmodel'] = tot_rchi2_model
@@ -887,6 +888,7 @@ class BaseImage():
                 nparam = 0
             ndof = np.max([len(bands), ntotal_pix - nparam]).astype(np.int32)
             chi2 = np.sum(np.array([self.model_tracker[source_id][stage][band]['chisq'] for band in bands]))
+            self.model_tracker[source_id][stage]['total'] = {}
             self.model_tracker[source_id][stage]['total']['rchisq'] = chi2 / ndof
             tot_rchi2_model = np.sum(rchi2_model_top) / np.sum(rchi2_model_bot)
             self.model_tracker[source_id][stage]['total']['rchisqmodel'] = tot_rchi2_model
