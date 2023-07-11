@@ -189,7 +189,7 @@ def get_fwhm(img):
         fwhm = np.nan
     return fwhm
 
-def get_resolution(img, sig=3):
+def get_resolution(img, sig=3.):
     fwhm = get_fwhm(img)
     return np.pi * (sig / (2 * 2.5)* fwhm)**2
 
@@ -601,9 +601,9 @@ def get_params(model):
 
     elif isinstance(model, FixedCompositeGalaxy):
         source['softfracdev'] = model.fracDev.getValue()
-        source['fracdev'] = model.fracDev.clipped().getValue()
+        source['fracdev'] = model.fracDev.clipped()
         source['softfracdev.err'] = np.sqrt(model.variance.fracDev.getValue())
-        source['fracdev.err'] = np.sqrt(model.variance.fracDev.clippe().getValue())
+        source['fracdev.err'] = np.sqrt(model.variance.fracDev.clipped())
         for skind, shape, variance_shape in zip(('_exp', '_dev'), (model.shapeExp, model.shapeDev), (model.variance.shapeExp, model.variance.shapeDev)):
             source[f'logre{skind}'] = shape.logre # log(arcsec)
             source[f'logre{skind}.err'] = np.sqrt(variance_shape.logre)

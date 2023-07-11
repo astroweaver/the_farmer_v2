@@ -267,7 +267,6 @@ class BaseImage():
         elif self.get_property('backtype', band=band) == 'variable':
             return self.get_image(band=band, imgtype='background')
 
-
     def stage_images(self, bands=conf.MODEL_BANDS, data_imgtype='science'):
         if bands is None:
             bands = self.get_bands()
