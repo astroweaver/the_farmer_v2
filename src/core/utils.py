@@ -578,6 +578,8 @@ def get_params(model):
 
     # shape
     if isinstance(model, (ExpGalaxy, DevGalaxy)) & ~isinstance(model, SimpleGalaxy):
+        print(model)
+        print(model.shape)
         source['logre'] = model.shape.logre # log(arcsec)
         source['logre.err'] = np.sqrt(model.variance.shape.logre)
         source['ellip'] = model.shape.e
