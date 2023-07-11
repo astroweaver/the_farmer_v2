@@ -577,10 +577,7 @@ def get_params(model):
             source[f'total.{stat}'] = model.statistics[stat]
 
     # shape
-    if isinstance(model, PointSource):
-        continue
-    
-    if isinstance(model, (ExpGalaxy, DevGalaxy)) & ~(model.getName() != 'SimpleGalaxy'):
+    if isinstance(model, (ExpGalaxy, DevGalaxy)) & ~(model.getSourceType() != 'SimpleGalaxy'):
         print(model)
         print(model.shape)
         source['logre'] = model.shape.logre # log(arcsec)
