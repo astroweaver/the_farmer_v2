@@ -1,4 +1,3 @@
-from tkinter import E
 import config as conf
 from .utils import verify_psfmodel, dilate_and_group
 from .brick import Brick

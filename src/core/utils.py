@@ -622,7 +622,7 @@ def get_params(model):
             source[f'reff{skind}'] = np.exp(shape.logre) * u.arcsec # in arcsec
             source[f'reff{skind}.err'] = np.sqrt(variance_shape.logre) * source[f'reff{skind}'] # TODO IS THIS WRONG????
 
-            source[f'ba{skind}'] = (1. - shape.e) / (shape.e + 1.)
+            source[f'ba{skind}'] = (1. - np.abs(shape.e)) / (1. + np.abs(shape.e))
             source[f'ba{skind}.err'] = np.sqrt(variance_shape.e) * (2. / (1. + shape.e)**2)
             
             source[f'pa{skind}'] = 90. * u.deg + np.rad2deg(shape.theta) * u.deg
