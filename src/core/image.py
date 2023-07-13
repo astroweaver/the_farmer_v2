@@ -769,10 +769,12 @@ class BaseImage():
                 ndof = np.max([1, ndata - nparam])
                 rchi2 = chi2 / ndof
                 
-                # dustin's rchi2
-                
-
-                self.logger.info(f'   {band}: 𝛘2/N = {rchi2:2.2f} ({rchi2_model:2.2f}) | N(data) = {ndata:2.2f} ({nres_elem:2.2f}) | N(param) = {nparam:2.0f} | N(DOF) = {ndof:2.2f} | Med(𝛘) = {chi_pc[2]:2.2f} | Width(𝛘) = {chi_pc[3]-chi_pc[1]:2.2f}')
+                self.logger.info(f'   {band}: chi2/N = {rchi2:2.2f} ({rchi2_model:2.2f})')
+                self.logger.info(f'   {band}: N(data) = {ndata:2.2f} ({nres_elem:2.2f})')
+                self.logger.info(f'   {band}: N(param) = {nparam:2.0f}')
+                self.logger.info(f'   {band}: N(DOF) = {ndof:2.2f}')
+                self.logger.info(f'   {band}: Med(chi) = {chi_pc[2]:2.2f}')
+                self.logger.info(f'   {band}: Width(chi) = {chi_pc[3]-chi_pc[1]:2.2f}')
                 
                 ntotal_pix += ndata 
                 ntotalres_elem += nres_elem
@@ -802,7 +804,8 @@ class BaseImage():
             tot_rchi2_model = np.sum(rchi2_model_top) / np.sum(rchi2_model_bot)
             self.model_tracker[self.type][stage]['total']['rchisqmodel'] = tot_rchi2_model
             self.model_tracker[self.type][stage]['total']['rchisq'] = chi2 / ndof
-            for pc, chi_npc in zip(q_pc, np.nanpercentile(totchi, q=q_pc)):
+            chi_pc = np.nanpercentile(totchi, q=q_pc)
+            for pc, chi_npc in zip(q_pc, chi_pc):
                 self.model_tracker[self.type][stage][f'chi_pc{pc}'] = chi_npc
             if len(totchi) >= 8:
                 self.model_tracker[self.type][stage]['total']['chi_k2'] = stats.normaltest(totchi)[0]
@@ -812,7 +815,13 @@ class BaseImage():
             self.model_tracker[self.type][stage]['total']['nparam'] = nparam
             self.model_tracker[self.type][stage]['total']['ndof'] = ndof
             self.model_tracker[self.type][stage]['total']['nres'] = ntotalres_elem
-            self.logger.info(f'   ==> 𝛘2/N = {chi2/ndof:2.2f} ({tot_rchi2_model:2.2f}) | N(data) = {ntotal_pix:2.2f} ({ntotalres_elem:2.2f}) | N(param) = {nparam:2.0f} | N(DOF) = {ndof:2.2f}')
+
+            self.logger.info(f'   {band}: chi2/N = {chi2/ndof:2.2f} ({tot_rchi2_model:2.2f})')
+            self.logger.info(f'   {band}: N(data) = {ntotal_pix:2.2f} ({ntotalres_elem:2.2f})')
+            self.logger.info(f'   {band}: N(param) = {nparam:2.0f}')
+            self.logger.info(f'   {band}: N(DOF) = {ndof:2.2f}')
+            self.logger.info(f'   {band}: Med(chi) = {chi_pc[2]:2.2f}')
+            self.logger.info(f'   {band}: Width(chi) = {chi_pc[3]-chi_pc[1]:2.2f}')
 
         for i, src in enumerate(self.catalogs[self.catalog_band][self.catalog_imgtype]):
             source_id = src['ID']
@@ -836,9 +845,9 @@ class BaseImage():
                 segmap = self.get_image('segmap', band)
                 chi = self.get_image('chi', band=band)[segmap==source_id].flatten()
                 totchi += list(chi)
-                chi2, chi_pc = np.nansum(chi**2), np.nanpercentile(chi, q=(5, 16, 50, 84, 95))
+                chi2, chi_pc = np.nansum(chi**2), np.nanpercentile(chi, q=q_pc)
                 if np.isscalar(chi_pc):
-                    chi_pc = np.nan * np.ones(5)
+                    chi_pc = np.nan * np.ones(len(q_pc))
                 
                 data = self.images[band].data.copy()
                 data[(self.images[band].invvar <= 0) | (segmap != source_id)] = 0
@@ -860,11 +869,13 @@ class BaseImage():
                 ndof = np.max([1, ndata - nparam]).astype(np.int32)
                 rchi2 = chi2 / ndof
                 
-                # dustin's rchi2
-                
+                self.logger.info(f'   {band}: chi2/N = {rchi2:2.2f} ({rchi2_model:2.2f})')
+                self.logger.info(f'   {band}: N(data) = {ndata:2.2f} ({nres_elem:2.2f})')
+                self.logger.info(f'   {band}: N(param) = {nparam:2.0f}')
+                self.logger.info(f'   {band}: N(DOF) = {ndof:2.2f}')
+                self.logger.info(f'   {band}: Med(chi) = {chi_pc[2]:2.2f}')
+                self.logger.info(f'   {band}: Width(chi) = {chi_pc[3]-chi_pc[1]:2.2f}')
 
-                self.logger.info(f'   {band}: 𝛘2/N = {rchi2:2.2f} ({rchi2_model:2.2f}) | N(data) = {ndata:2.2f} ({nres_elem:2.2f}) | N(param) = {nparam:2.0f} | N(DOF) = {ndof:2.2f} | Med(𝛘) = {chi_pc[2]:2.2f} | Width(𝛘) = {chi_pc[3]-chi_pc[1]:2.2f}')
-                
                 ntotal_pix += ndata
                 ntotalres_elem += nres_elem
                 if stage is not None:
@@ -893,7 +904,7 @@ class BaseImage():
             tot_rchi2_model = np.sum(rchi2_model_top) / np.sum(rchi2_model_bot)
             self.model_tracker[source_id][stage]['total']['rchisqmodel'] = tot_rchi2_model
             self.model_tracker[source_id][stage]['total']['chisq'] = chi2
-            for pc, chi_npc in zip(q_pc, np.nanpercentile(totchi, q=(5, 16, 50, 84, 95))):
+            for pc, chi_npc in zip(q_pc, np.nanpercentile(totchi, q=q_pc)):
                 self.model_tracker[source_id][stage]['total'][f'chi_pc{pc}'] = chi_npc
             if len(totchi) >= 8:
                 self.model_tracker[source_id][stage]['total']['chi_k2'] = stats.normaltest(totchi)[0]
@@ -903,7 +914,13 @@ class BaseImage():
             self.model_tracker[source_id][stage]['total']['nparam'] = nparam
             self.model_tracker[source_id][stage]['total']['ndof'] = ndof
             self.model_tracker[source_id][stage]['total']['nres'] = ntotalres_elem
-            self.logger.info(f'   ==> 𝛘2/N = {chi2/ndof:2.2f} ({tot_rchi2_model:2.2f}) | N(data) = {ntotal_pix:2.2f} ({ntotalres_elem:2.2f}) | N(param) = {nparam:2.0f} | N(DOF) = {ndof:2.2f}')
+
+            self.logger.info(f'   {band}: chi2/N = {chi2/ndof:2.2f} ({tot_rchi2_model:2.2f})')
+            self.logger.info(f'   {band}: N(data) = {ntotal_pix:2.2f} ({ntotalres_elem:2.2f})')
+            self.logger.info(f'   {band}: N(param) = {nparam:2.0f}')
+            self.logger.info(f'   {band}: N(DOF) = {ndof:2.2f}')
+            self.logger.info(f'   {band}: Med(chi) = {chi_pc[2]:2.2f}')
+            self.logger.info(f'   {band}: Width(chi) = {chi_pc[3]-chi_pc[1]:2.2f}')
 
     def build_all_images(self, bands=None, source_id=None, overwrite=True):
         if bands is None:
@@ -1894,7 +1911,7 @@ class BaseImage():
             params = get_params(source)
 
             for name in params:
-                if name.startswith('_'):
+                if name.startswith('_') | (name == 'total.total'):
                     continue
                 value = params[name]
                 try:
@@ -1912,7 +1929,6 @@ class BaseImage():
                     self.logger.debug(f'G{group_id}.S{source_id} :: {name} = {value}')
                 else:
                     self.logger.debug(f'G{group_id}.S{source_id} :: {name} = {value:2.2f}')
-
 
         # update catalog for self
         self.set_catalog(catalog, catalog_band=catalog_band, catalog_imgtype=catalog_imgtype)

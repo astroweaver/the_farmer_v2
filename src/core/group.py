@@ -132,7 +132,7 @@ class Group(BaseImage):
             for imgtype in brick.data[band].keys():
                 if imgtype in ('science', 'weight', 'mask', 'background', 'segmap', 'groupmap', 'back', 'rms', 'model', 'residual', 'chi'):
                     fill_value = np.nan
-                    if imgtype == 'mask':
+                    if imgtype in ('segmap', 'groupmap', 'mask'):
                         fill_value = True
                     cutout = Cutout2D(brick.data[band][imgtype].data, self.position, self.buffsize, wcs=brick.data[band][imgtype].wcs,
                                     mode='partial', fill_value = fill_value, copy=True)
