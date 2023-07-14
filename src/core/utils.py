@@ -142,7 +142,7 @@ def dilate_and_group(catalog, segmap, radius=0, fill_holes=False):
     """
 
     # segmask
-    segmask = np.where(segmap==0, 0, segmap)
+    segmask = np.where(segmap>0, 1, 0)
 
     # dilation
     if (radius is not None) & (radius > 0):
@@ -157,8 +157,8 @@ def dilate_and_group(catalog, segmap, radius=0, fill_holes=False):
     # relabel
     groupmap, n_groups = label(segmask)
     logger.debug(f'Found {np.max(groupmap)} groups for {np.max(segmap)} sources.')
-    x, y = np.round(catalog['x']).astype(int), np.round(catalog['y']).astype(int)
-    group_ids = groupmap[y, x]
+    segid, idx = np.unique(segmap.flatten(), return_index=True)
+    group_ids = groupmap.flatten()[idx[segid>0]]
 
     group_pops = -99 * np.ones(len(catalog), dtype=int)
     for i, group_id in enumerate(group_ids):

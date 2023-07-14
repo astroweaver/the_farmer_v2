@@ -46,6 +46,7 @@ class Brick(BaseImage):
             self.type = 'brick'
             self.n_sources = {}
             self.group_ids = {}
+            self.group_pops = {}
             self.model_catalog = OrderedDict()
             self.model_tracker = OrderedDict()
             self.model_tracker_groups = OrderedDict()
@@ -101,6 +102,7 @@ class Brick(BaseImage):
         self.n_sources[mosaic.band] = {}
         self.catalogs[mosaic.band] = {}
         self.group_ids[mosaic.band] = {}
+        self.group_pops[mosaic.band] = {}
         self.bands.append(mosaic.band)
 
         # Loop over properties
@@ -219,6 +221,7 @@ class Brick(BaseImage):
         self.catalogs[band][imgtype].add_column(group_pops, name='group_pop', index=3)
         self.data[band]['groupmap'] = Cutout2D(groupmap, self.position, self.buffsize[::-1], self.wcs[band], mode='partial', fill_value = 0)
         self.group_ids[band][imgtype] = np.unique(group_ids)
+        self.group_pops[band][imgtype] = dict(zip(group_ids, group_pops))
         self.headers[band]['groupmap'] = self.headers[band]['science']
 
     def spawn_group(self, group_id=None, imgtype='science', bands=None):
