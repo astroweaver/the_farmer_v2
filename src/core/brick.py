@@ -51,6 +51,7 @@ class Brick(BaseImage):
             self.model_tracker_groups = OrderedDict()
             self.catalog_band='detection'
             self.catalog_imgtype='science'
+            self.priors = None
             
 
             # Position
@@ -294,7 +295,7 @@ class Brick(BaseImage):
         return group
 
             
-    def absorb(self, group):
+    def absorb(self, group): # eventually allow mosaic to do this too! absorb bricks + make a huge model catalog!
 
         # check ownership
         assert(self.brick_id == group.brick_id, 'Group does not belong to this brick!')

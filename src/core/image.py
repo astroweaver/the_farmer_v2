@@ -359,7 +359,10 @@ class BaseImage():
             bands.remove('detection')
 
         # Trackers
-        self.logger.debug(f'Staging models for group #{self.group_id}')
+        if hasattr(self, 'group_id'):
+            self.logger.debug(f'Staging models for group #{self.group_id}')
+        else:
+            self.logger.debug(f'Staging models for brick #{self.brick_id}')
 
         for src in self.catalogs[self.catalog_band][self.catalog_imgtype]:
 
@@ -924,9 +927,19 @@ class BaseImage():
 
     def build_all_images(self, bands=None, source_id=None, overwrite=True):
         if bands is None:
-            bands = self.engine.bands
+            bands = [band for band in self.bands if band != 'detection']
         elif np.isscalar(bands):
             bands = [bands,]
+
+        # check all bands have group and segmaps
+        for band in bands:
+            if 'segmap' not in self.data[band]:
+                self.transfer_maps(band)
+
+        self.stage_images(bands=bands)
+        self.stage_models(bands=bands)
+        self.engine = Tractor(list(self.images.values()), list(self.model_catalog.values()))
+        self.engine.bands = list(self.images.keys())
 
         self.build_model_image(bands, source_id, overwrite)
         self.build_residual_image(bands, source_id, overwrite)
@@ -934,7 +947,7 @@ class BaseImage():
 
     def build_model_image(self, bands=None, source_id=None, overwrite=True):
         if bands is None:
-            bands = self.engine.bands
+            bands = self.bands
         elif np.isscalar(bands):
             bands = [bands,]
         models = {}
@@ -950,16 +963,11 @@ class BaseImage():
             srcs = self.model_catalog.values()
 
         for band in bands:
-            if hasattr(self, 'engine') & (self.engine is not None):
-                if source_id is not None:
-                    model = Tractor([self.images[band],], Catalog(*srcs)).getModelImage(0)
-                else:
-                    model = self.engine.getModelImage(self.images[band])
-                    self.set_image(model, 'model', band)
+            if source_id is not None:
+                model = Tractor([self.images[band],], Catalog(*srcs)).getModelImage(0)
             else:
-                model = np.zeros_like(self.images[band].data)
-                if source_id is None:
-                    self.set_image(model, 'model', band)
+                model = self.engine.getModelImage(self.images[band])
+                self.set_image(model, 'model', band)
 
             self.logger.debug(f'Built model image for {band}')
             if len(bands) == 1:
@@ -971,7 +979,7 @@ class BaseImage():
         
     def build_residual_image(self, bands=None, source_id=None, imgtype='science', overwrite=True):
         if bands is None:
-            bands = self.engine.bands
+            bands = self.bands
         elif np.isscalar(bands):
             bands = [bands,]
         residuals = {}
@@ -996,7 +1004,7 @@ class BaseImage():
 
     def build_chi_image(self, bands=None, source_id=None, imgtype='science', overwrite=True):
         if bands is None:
-            bands = self.engine.bands
+            bands = self.bands
         elif np.isscalar(bands):
             bands = [bands,]
         chis = {}
@@ -1787,16 +1795,17 @@ class BaseImage():
                 raise RuntimeError(f'Cannot update {filename}! (allow_update = False)')
             else:
                 # open files and add to them
-                hdul = fits.open(path)
+                hdul = fits.open(path, mode='update')
+                makenew = False
         else:
             # make new files
             hdul = fits.HDUList()
             hdul.append(fits.PrimaryHDU())
+            makenew = True
 
         
         self.logger.debug(f'... adding data to fits')
         for band in self.data:
-            print(band, self.data[band])
             for attr in self.data[band]:
                 if attr == 'psfmodel':
                     continue
@@ -1829,13 +1838,13 @@ class BaseImage():
                 self.logger.debug(f'... added catalog for {band}')
 
 
-        try:
-            hdul.flush()
-            self.logger.info(f'Updated {filename} (allow_update = {allow_update})')
-        except:
+        if makenew:
             hdul.writeto(path, overwrite=conf.OVERWRITE)
             self.logger.info(f'Wrote to {filename} (allow_update = {allow_update})')
-
+        else:
+            hdul.flush()
+            self.logger.info(f'Updated {filename} (allow_update = {allow_update})')
+            
 
     def write_hdf5(self, allow_update=False, filename=None, directory=conf.PATH_BRICKS):
         if filename is None:
