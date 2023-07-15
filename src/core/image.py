@@ -848,7 +848,7 @@ class BaseImage():
                 segmap = self.get_image('segmap', band)
                 chi = self.get_image('chi', band=band)[segmap==source_id].flatten()
                 totchi += list(chi)
-                print(band, totchi, np.sum(segmap == source_id))
+                # print(band, totchi, np.sum(segmap == source_id))
                 chi2, chi_pc = np.nansum(chi**2), np.nanpercentile(chi, q=q_pc)
                 if np.isscalar(chi_pc):
                     chi_pc = np.nan * np.ones(len(q_pc))
