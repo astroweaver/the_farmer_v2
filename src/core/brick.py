@@ -295,6 +295,9 @@ class Brick(BaseImage):
             elif mode == 'photometry':
                 group.force_models()
 
+        else:
+            self.logger.warning(f'Group {group.group_id} has been rejected!')
+
         return group
 
             
