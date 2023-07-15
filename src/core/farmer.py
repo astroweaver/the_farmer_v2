@@ -258,7 +258,7 @@ def generate_models(brick_ids=None, group_ids=None, bands=conf.MODEL_BANDS, imgt
                 brick.write_hdf5(allow_update=True)
 
         # process the groups
-        brick.process_groups(group_ids=group_ids, imgtype=imgtype, mode='models')
+        brick.process_groups(group_ids=group_ids, imgtype=imgtype, mode='model')
 
         # write brick
         brick.write_hdf5(allow_update=True)
