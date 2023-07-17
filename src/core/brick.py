@@ -278,7 +278,7 @@ class Brick(BaseImage):
                 self.absorb(group)
         else:
             pool = ProcessPool(ncpus=conf.NCPUS)
-            groups = pool.imap(self.run_group, groups, **{'mode': mode})
+            groups = pool.map(self.run_group, groups, **{'mode': mode})
             # [self.absorb(group) for group in groups]
 
     def run_group(self, group, mode='all'):
