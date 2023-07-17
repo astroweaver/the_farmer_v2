@@ -6,6 +6,7 @@ from .group import Group
 
 import logging
 import os
+from functools import partial
 from astropy.nddata import Cutout2D
 import astropy.units as u
 import numpy as np
@@ -278,7 +279,7 @@ class Brick(BaseImage):
                 self.absorb(group)
         else:
             pool = ProcessPool(ncpus=conf.NCPUS)
-            result = pool.uimap(self.run_group, groups, **{'mode': mode})
+            result = pool.uimap(partial(self.run_group, mode=mode), groups)
             [self.absorb(group) for group in result]
 
     def run_group(self, group, mode='all'):
