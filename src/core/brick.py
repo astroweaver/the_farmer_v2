@@ -278,10 +278,13 @@ class Brick(BaseImage):
                 self.absorb(group)
         else:
             pool = ProcessPool(ncpus=conf.NCPUS)
-            groups = pool.map(self.run_group, groups, **{'mode': mode})
+            pool.amap(self.run_group, groups, **{'mode': mode})
             # [self.absorb(group) for group in groups]
 
     def run_group(self, group, mode='all'):
+
+        print('TEST')
+        return group
 
         if not group.rejected:
         
