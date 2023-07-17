@@ -1080,6 +1080,7 @@ class BaseImage():
 
                 fig = plt.figure(figsize=(20,20))
                 print(band, imgtype, self.get_wcs(band))
+                print(fig)
                 ax = fig.add_subplot(projection=self.get_wcs(band))
                 print(ax)
                 ax.set_title(f'{band} {imgtype} {tag}')
