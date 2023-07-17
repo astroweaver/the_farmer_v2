@@ -279,7 +279,7 @@ class Brick(BaseImage):
         else:
             pool = ProcessPool(ncpus=conf.NCPUS)
             groups = pool.imap(self.run_group, groups, **{'mode': mode})
-            [self.absorb(group) for group in groups]
+            # [self.absorb(group) for group in groups]
 
     def run_group(self, group, mode='all'):
 
@@ -289,11 +289,13 @@ class Brick(BaseImage):
                 group.determine_models()
                 group.force_models()
         
-            elif mode == 'models':
+            elif mode == 'model':
                 group.determine_models()
 
             elif mode == 'photometry':
                 group.force_models()
+
+            self.absorb(group)
 
         else:
             self.logger.warning(f'Group {group.group_id} has been rejected!')
