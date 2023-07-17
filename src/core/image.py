@@ -368,7 +368,7 @@ class BaseImage():
 
             source_id = src['ID']
             if source_id not in self.model_catalog:
-                self.logger.warning('Source #{source_id} is not in the model catalog! Skipping...')
+                self.logger.warning(f'Source #{source_id} is not in the model catalog! Skipping...')
                 continue
                 
             # inital position

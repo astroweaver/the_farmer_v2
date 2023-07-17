@@ -267,10 +267,6 @@ class Brick(BaseImage):
         elif np.isscalar(group_ids):
             group_ids = [group_ids,]
 
-        
-        # HACK
-        group_ids = group_ids[:10]
-
         groups = (self.spawn_group(group_id) for group_id in group_ids)
 
         # loop or parallel groups
