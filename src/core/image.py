@@ -367,6 +367,9 @@ class BaseImage():
         for src in self.catalogs[self.catalog_band][self.catalog_imgtype]:
 
             source_id = src['ID']
+            if src not in self.model_catalog:
+                self.logger.warning('Source #{source_id} is not in the model catalog! Skipping...')
+                continue
                 
             # inital position
             position = RaDecPos(src['ra'], src['dec'])
