@@ -278,8 +278,8 @@ class Brick(BaseImage):
                 self.absorb(group)
         else:
             pool = ProcessPool(ncpus=conf.NCPUS)
-            pool.uimap(self.run_group, groups, **{'mode': mode})
-            [self.absorb(group) for group in groups]
+            result = pool.uimap(self.run_group, groups, **{'mode': mode})
+            [self.absorb(group) for group in result]
 
     def run_group(self, group, mode='all'):
 
@@ -294,8 +294,6 @@ class Brick(BaseImage):
 
             elif mode == 'photometry':
                 group.force_models()
-
-            # self.absorb(group)
 
         else:
             self.logger.warning(f'Group {group.group_id} has been rejected!')
@@ -332,6 +330,5 @@ class Brick(BaseImage):
             else:
                 self.model_tracker[source] = group.model_tracker[source]
 
-        del group
-
         self.logger.debug(f'Group {group.group_id} has been absorbed')
+        del group
