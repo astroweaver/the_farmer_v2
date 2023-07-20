@@ -41,7 +41,7 @@ class Brick(BaseImage):
             self.wcs = {}
             self.pixel_scales = {}
             self.data = {} 
-            self.headers = {}
+            self.headers = {}Fcop
             self.properties = {}
             self.catalogs = {}
             self.type = 'brick'
@@ -283,6 +283,9 @@ class Brick(BaseImage):
             [self.absorb(group) for group in result]
 
     def run_group(self, group, mode='all'):
+        print(group.rejected, mode)
+
+        return group
 
         if not group.rejected:
         
