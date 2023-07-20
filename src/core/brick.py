@@ -41,7 +41,7 @@ class Brick(BaseImage):
             self.wcs = {}
             self.pixel_scales = {}
             self.data = {} 
-            self.headers = {}Fcop
+            self.headers = {}
             self.properties = {}
             self.catalogs = {}
             self.type = 'brick'
