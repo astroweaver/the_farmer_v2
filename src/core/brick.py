@@ -283,11 +283,6 @@ class Brick(BaseImage):
             [self.absorb(group) for group in result]
 
     def run_group(self, group, mode='all'):
-        print(group.rejected, mode)
-
-        group.determine_models()
-
-        return group
 
         if not group.rejected:
         
