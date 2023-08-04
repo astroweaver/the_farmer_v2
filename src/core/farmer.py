@@ -68,14 +68,15 @@ OVERWRITE ................. {conf.OVERWRITE}
 from .utils import start_logger
 logger = start_logger()
 
-print('You should start by running farmer.verify()!')
+print('You should start by running farmer.validate()!')
 
 # Look at mosaics and check they exist
-def verify():
-    logger.info('Verifying bands...')
+def validate():
+    logger.info('Validate bands...')
     Mosaic('detection', load=False)
     for band in conf.BANDS.keys():
         Mosaic(band, load=False)
+    logger.info('All bands validated successfully.')
 
 
 def get_mosaic(band, load=True):
