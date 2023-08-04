@@ -73,6 +73,7 @@ print('You should start by running farmer.verify()!')
 # Look at mosaics and check they exist
 def verify():
     logger.info('Verifying bands...')
+    Mosaic('detection', load=False)
     for band in conf.BANDS.keys():
         Mosaic(band, load=False)
 
