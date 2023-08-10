@@ -99,17 +99,52 @@ class BaseImage():
         self.logger.debug(f'Getting {imgtype} image for {band}')# ( {tsum:2.2f} / {mean:2.2f} / {med:2.2f} / {std:2.2f} )')
         return image
 
-    def get_psfmodel(self, band=None, normalization=None): # TODO NEEDS WORK!
+    def get_psfmodel(self, band=None, coord=None):
+        # If you run models on a brick/mosaic **or reconstruct** one, I'll always grab the one nearest the center
+        # If you run models on a group, I'll always grab the one nearest to the center of the group
 
         if self.type == 'mosaic':
-            psfmodel = self.data['psfmodel'].copy()
+            psfcoords, psflist = self.data['psflist'].copy()
         else:
-            psfmodel = self.data[band]['psfmodel'].copy()
+            psfcoords, psflist = self.data[band]['psflist'].copy()
+
+        if psfcoords is None: # single psf!
+            if coord is not None:
+                self.logger.warning(f'{band} has only a single PSF! Coordinates ignored.')
+            psf_path = psflist
+            self.logger.info(f'Found a constant PSF for {band}.')
+        else:
+            if coord is None:
+                if self.type != 'group':
+                    self.logger.warning(f'{band} has mutliple PSFs but no coordinates supplied. Picking the nearest.')
+                coord = self.center
             
-        # if normalization is None:
-        psfmodel -= np.median(psfmodel[:10, :10])
+            # find nearest to coord
+            psf_idx, d2d, __ = coord.match_to_catalog_sky(psfcoords, 1)
+            self.logger.info(f'Found the nearest PSF for {band} {d2d.to(u.arcmin)} away.')
+            psf_path = psflist[psf_idx]
+
+        # Try to open
+        if psf_path.endswith('.psf'):
+            try:
+                psfmodel = PixelizedPsfEx(fn=psf_path)
+                self.logger.debug(f'PSF model for {band} identified as PixelizedPsfEx.')
+
+            except:
+                img = fits.open(psf_path)[0].data
+                img = img.astype('float32')
+                psfmodel = PixelizedPSF(img)
+                self.logger.debug(f'PSF model for {band} identified as PixelizedPSF.')
+            
+        elif psf_path.endswith('.fits'):
+            img = fits.open(psf_path)[0].data
+            img = img.astype('float32')
+            psfmodel = PixelizedPSF(img)
+            self.logger.debug(f'PSF model for {band} identified as PixelizedPSF.')
+
+        # process a bit
+        img = img.astype('float32')
         psfmodel[psfmodel<1e-31] = 1e-31
-        psfmodel /= np.sum(psfmodel)
             
         return psfmodel
 
@@ -277,7 +312,7 @@ class BaseImage():
 
         self.logger.debug(f'Staging images for The Tractor... (image --> {data_imgtype})')
         for band in bands:
-            psfmodel = PixelizedPSF(self.get_psfmodel(band=band))
+            psfmodel = self.get_psfmodel(band=band)
             # from tractor.psf import NCircularGaussianPSF
             # psfmodel = NCircularGaussianPSF([5.], [1.])
             # psfmodel.img = np.ones((100, 100))
@@ -940,7 +975,7 @@ class BaseImage():
             if 'segmap' not in self.data[band]:
                 self.transfer_maps(band)
 
-        self.stage_images(bands=bands)
+        self.stage_images(bands=bands) # assumes a single PSF!
         self.stage_models(bands=bands)
         self.engine = Tractor(list(self.images.values()), list(self.model_catalog.values()))
         self.engine.bands = list(self.images.keys())
@@ -1377,7 +1412,7 @@ class BaseImage():
                 cmap = plt.get_cmap('rainbow', len(source_ids))
                 pixscl = self.pixel_scales[band]
                 histbins = np.linspace(-3, 3, 20)
-                hwhm = get_fwhm(self.get_psfmodel(band=band)) / 2. * pixscl[0].to(u.arcsec).value
+                hwhm = get_fwhm(self.get_psfmodel(band=band).data) / 2. * pixscl[0].to(u.arcsec).value
                 
                 cutout = self.data[band]['science']
                 upper = self.wcs[band].pixel_to_world(cutout.shape[1], cutout.shape[0])
@@ -1568,7 +1603,7 @@ class BaseImage():
                 # axes[3,2].plot(px, py, color='g')
 
                 nx, ny = np.shape(img)
-                psf = self.get_psfmodel(band)
+                psf = self.get_psfmodel(band).data
                 scl = 1
                 zoomed_psf = ndimage.zoom(psf, scl)
                 zoomed_psf /= np.sum(zoomed_psf)

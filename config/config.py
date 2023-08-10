@@ -24,8 +24,7 @@ BANDS = {}
 BANDS['hsc_i'] = {
     'science': os.path.join(PATH_DATA, 'external/COSMOS_Cgalsim_hsc_i_22626PS.fits'),
     'weight': os.path.join(PATH_DATA, 'external/COSMOS_Cgalsim_hsc_i_noise_WEIGHT.fits'),
-    'psfmodel': os.path.join(PATH_PSFMODELS, 'hsc_i.fits'),
-    'psfmodel_type': 'constant',
+    'psfmodel': os.path.join(PATH_PSFMODELS, 'hsc_i.fits'), # can either be a PSF file, or a table of ra/dec/psf_path
     'subtract_background': True, 
     'backtype': 'flat',
     'backregion': 'mosaic',
@@ -36,7 +35,6 @@ BANDS['hsc_z'] = {
     'science': os.path.join(PATH_DATA, 'external/COSMOS_Cgalsim_hsc_z_22626PS.fits'),
     'weight': os.path.join(PATH_DATA, 'external/COSMOS_Cgalsim_hsc_z_noise_WEIGHT.fits'),
     'psfmodel': os.path.join(PATH_PSFMODELS, 'hsc_z.fits'),
-    'psfmodel_type': 'constant',
     'subtract_background': True, 
     'backtype': 'flat',
     'backregion': 'mosaic',
@@ -47,7 +45,6 @@ BANDS['uvista_ks'] = {
     'science': os.path.join(PATH_DATA, 'external/COSMOS_Cgalsim_uvista_ks_22626PS.fits'),
     'weight': os.path.join(PATH_DATA, 'external/COSMOS_Cgalsim_uvista_ks_noise_WEIGHT.fits'),
     'psfmodel': os.path.join(PATH_PSFMODELS, 'uvista_ks.fits'),
-    'psfmodel_type': 'constant',
     'subtract_background': True, 
     'backtype': 'flat',
     'backregion': 'mosaic',
@@ -58,7 +55,6 @@ BANDS['irac_ch1'] = {
     'science': os.path.join(PATH_DATA, 'external/COSMOS_Cgalsim_irac_ch1.fits'),
     'weight': os.path.join(PATH_DATA, 'external/COSMOS_Cgalsim_irac_ch1_noise.fits'),
     'psfmodel': os.path.join(PATH_PSFMODELS, 'irac_ch1.fits'),
-    'psfmodel_type': 'constant',
     'backtype': 'flat',
     'backregion': 'mosaic',
     'subtract_background': True, 

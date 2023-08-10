@@ -195,68 +195,43 @@ def get_resolution(img, sig=3.):
 
 def verify_psfmodel(band):
     logger = logging.getLogger('farmer.verify_psfmodel')
-    psfmodel_type = conf.BANDS[band]['psfmodel_type']
     psfmodel_path = conf.BANDS[band]['psfmodel']
-    if psfmodel_type == 'PSFGRID':
-        # open up gridpnt file
-        if os.path.exists(psfmodel_path):
-            if os.path.exists(psfmodel_path):
-                psftab_grid = ascii.read(psfmodel_path)
-                psftab_ra = psftab_grid['RA']
-                psftab_dec = psftab_grid['Dec']
-                psfcoords = SkyCoord(ra=psftab_ra*u.degree, dec=psftab_dec*u.degree)
-                psffname = psftab_grid['FILE_ID']
-                psfmodel = (psfcoords, psffname)
-                logger.debug(f'Adopted PSFGRID PSF.') 
-            else:
-                raise RuntimeError(f'{band} is in PRFGRID but does NOT have an gridpoint file!')
-        else:
-            raise RuntimeError(f'{band} is in PRFGRID but does NOT have an output directory!')
 
-    elif psfmodel_type == 'PRFMAP':
-        try:        
-            # read in prfmap table
-            prftab = ascii.read(psfmodel_path)
-            prftab_ra = prftab[conf.PRFMAP_COLUMNS[1]]
-            prftab_dec = prftab[conf.PRFMAP_COLUMNS[2]]
-            prfcoords = SkyCoord(ra=prftab_ra*u.degree, dec=prftab_dec*u.degree)
-            prfidx = prftab[conf.PRFMAP_COLUMNS[0]]
-            psfmodel = (prfcoords, prfidx)
-            logger.debug(f'Adopted PRFMap PSF.') 
+    # maybe it's a table of ra, dec, and path_ending?
+    try:
+        psfgrid = Table.read(psfmodel_path)
+        cols = psfgrid.colnames
+        psfgrid_ra = psfgrid[cols[0]]
+        psfgrid_dec = psfgrid[cols[1]]
+        psfcoords = SkyCoord(ra=psfgrid_ra*u.degree, dec=psfgrid_dec*u.degree)
+        # I'm expecting that all of these psfnames are based in PATH_PSFMODELS
+        psflist = [os.path.join(conf.PATH_PSFMODELS, fname) for fname in psfgrid[cols[2]]]
+
+    except: # better be a single file
+        psfcoords = None
+        psflist = os.path.join(conf.PATH_PSFMODELS, psfmodel_path)
+
+    psfmodel = (psfcoords, psflist)
+
+    # try out the first one
+    fname = psfmodel[1][0]
+
+    if fname.endswith('.psf'):
+        try:
+            psfmodel = PixelizedPsfEx(fn=fname)
+            logger.debug(f'PSF model for {band} identified as PixelizedPsfEx.')
+
         except:
-            raise RuntimeError(f'{band} is in PRFMAP_PS but does NOT have a PRFMAP grid filename!')
-
-      
-    elif psfmodel_type == 'constant':
-        if psfmodel_path.endswith('.psf'):
-            try:
-                psfmodel = PixelizedPsfEx(fn=psfmodel_path)
-                logger.debug(f'PSF model for {band} adopted as PixelizedPsfEx.')
-
-            except:
-                img = fits.open(psfmodel_path)[0].data
-                img = img.astype('float32')
-                img[img<=0.] = 1E-31
-                psfmodel = PixelizedPSF(img)
-                logger.debug(f'PSF model for {band} adopted as PixelizedPSF.')
-    
-        elif psfmodel_path.endswith('.fits'):
-            img = fits.open(psfmodel_path)[0].data
+            img = fits.open(fname)[0].data
             img = img.astype('float32')
-            img[img<=0.] = 1E-31
             psfmodel = PixelizedPSF(img)
-            logger.debug(f'PSF model for {band} adopted as PixelizedPSF.')
-
-    else:
-        if psfmodel_type == 'gaussian':
-            psfmodel = None
-            logger.warning(f'PSF model not found for {band} -- using {conf.PSF_SIGMA}" gaussian!')
-        else:
-            raise ValueError(f'PSF model not found for {band}!')
-
-    # normalize it
-    psfmodel.img /= np.sum(psfmodel.img)
-
+            logger.debug(f'PSF model for {band} identified as PixelizedPSF.')
+        
+    elif fname.endswith('.fits'):
+        img = fits.open(fname)[0].data
+        img = img.astype('float32')
+        psfmodel = PixelizedPSF(img)
+        logger.debug(f'PSF model for {band} identified as PixelizedPSF.')
 
     return psfmodel
 
@@ -592,11 +567,13 @@ def get_params(model):
         source['theta'] = np.rad2deg(model.shape.theta) * u.deg
         source['theta.err'] = np.sqrt(np.rad2deg(model.variance.shape.theta)) * u.deg
 
-        source['reff'] = np.exp(model.shape.logre) * u.arcsec # in arcsec
-        source['reff.err'] = np.sqrt(model.variance.shape.logre) * source['reff']
+        source[f'reff{skind}'] = np.exp(model.shape.logre) * u.arcsec # in arcsec
+        source[f'reff{skind}.err'] = np.sqrt(model.variance_shape.logre) * source[f'reff{skind}'] * np.log(10)
 
-        source['ba'] = (1. - model.shape.e) / (model.shape.e + 1.)
-        source['ba.err'] = np.sqrt(model.variance.shape.e) * (2. / (1. + model.shape.e)**2)
+        boa = (1. - np.abs(model.shape.e)) / (1. + np.abs(model.shape.e))
+        boa_sig = boa * np.sqrt(model.variance_shape.e) * np.sqrt((1/(1.-model.shape.e))**2 + (1/(1.+model.shape.e))**2)
+        source[f'ba{skind}'] = boa
+        source[f'ba{skind}.err'] = boa_sig
         
         source['pa'] = 90. * u.deg + np.rad2deg(model.shape.theta) * u.deg
         source['pa.err'] = np.rad2deg(model.variance.shape.theta) * u.deg
@@ -620,10 +597,12 @@ def get_params(model):
             source[f'theta{skind}.err'] = np.sqrt(np.rad2deg(variance_shape.theta)) * u.deg
 
             source[f'reff{skind}'] = np.exp(shape.logre) * u.arcsec # in arcsec
-            source[f'reff{skind}.err'] = np.sqrt(variance_shape.logre) * source[f'reff{skind}'] # TODO IS THIS WRONG????
+            source[f'reff{skind}.err'] = np.sqrt(variance_shape.logre) * source[f'reff{skind}'] * np.log(10)
 
-            source[f'ba{skind}'] = (1. - np.abs(shape.e)) / (1. + np.abs(shape.e))
-            source[f'ba{skind}.err'] = np.sqrt(variance_shape.e) * (2. / (1. + shape.e)**2)
+            boa = (1. - np.abs(shape.e)) / (1. + np.abs(shape.e))
+            boa_sig = boa * np.sqrt(variance_shape.e) * np.sqrt((1/(1.-shape.e))**2 + (1/(1.+shape.e))**2)
+            source[f'ba{skind}'] = boa
+            source[f'ba{skind}.err'] = boa_sig
             
             source[f'pa{skind}'] = 90. * u.deg + np.rad2deg(shape.theta) * u.deg
             source[f'pa{skind}.err'] = np.rad2deg(variance_shape.theta) * u.deg
