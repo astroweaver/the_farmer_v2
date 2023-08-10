@@ -1746,8 +1746,7 @@ class BaseImage():
                 xax = np.arange(-np.shape(psfmodel)[0]/2 + 0.5,  np.shape(psfmodel)[0]/2+0.5)
                 [axes[3,0].plot(xax * pixscl, psfmodel[x], c='royalblue', alpha=0.5) for x in np.arange(0, np.shape(psfmodel)[1])]
                 axes[3,0].axvline(0, ls='dashed', c='k')
-                psftype = self.get_property('psfmodel_type', band=band)
-                axes[3,0].text(0.05, 0.90, f'PSF ({psftype})', transform=axes[3,0].transAxes, fontweight='bold')
+                axes[3,0].text(0.05, 0.90, f'PSF', transform=axes[3,0].transAxes, fontweight='bold')
                 
                 axes[3,0].axvline(-hwhm, ls='dotted', c='grey')
                 axes[3,0].axvline(hwhm, ls='dotted', c='grey')

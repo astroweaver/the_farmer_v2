@@ -12,7 +12,6 @@ import numpy as np
 from astropy.wcs.utils import proj_plane_pixel_scales
 
 default_properties = {}
-default_properties['psfmodel_type'] = 'constant'
 default_properties['subtract_background'] = False
 default_properties['backtype'] = 'flat'
 default_properties['backregion'] = 'mosaic'
@@ -66,14 +65,9 @@ class Mosaic(BaseImage):
             # verify the psf model
             psf_status = bad
             if band == 'detection':
-                self.psfmodel_type = 'none'
                 psf_status = '--'
             else:
-                if 'psfmodel_type' not in self.properties:
-                    self.logger.warning(f'{band} does not have a psf model type! Assuming constant.')
-                    self.properties['psfmodel_type'] = 'constant'
                 self.psfmodel = verify_psfmodel(band)
-                self.psfmodel_type = conf.BANDS[band]['psfmodel_type']
                 psf_status = good
 
 
@@ -95,7 +89,7 @@ class Mosaic(BaseImage):
             self.logger.debug(f'Mosaic {band} is centered at {self.center.ra:2.1f}, {self.center.dec:2.1f}')
             self.logger.debug(f'Mosaic {band} has size at {self.size[0]:2.1f}, {self.size[1]:2.1f}')
 
-            self.logger.info(f'{band:10}: {data_status} Data {tuple(data_provided)} {psf_status} PSF ({self.psfmodel_type}) {wcs_status} WCS ({self.center.ra:2.1f}, {self.center.dec:2.1f})')
+            self.logger.info(f'{band:10}: {data_status} Data {tuple(data_provided)} {psf_status} PSF {wcs_status} WCS ({self.center.ra:2.1f}, {self.center.dec:2.1f})')
 
         # Now load in the data (memory use!) -- and only what is necessary!
         if load:

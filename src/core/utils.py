@@ -218,19 +218,19 @@ def verify_psfmodel(band):
 
     if fname.endswith('.psf'):
         try:
-            psfmodel = PixelizedPsfEx(fn=fname)
+            test_psf = PixelizedPsfEx(fn=fname)
             logger.debug(f'PSF model for {band} identified as PixelizedPsfEx.')
 
         except:
             img = fits.open(fname)[0].data
             img = img.astype('float32')
-            psfmodel = PixelizedPSF(img)
+            test_psf = PixelizedPSF(img)
             logger.debug(f'PSF model for {band} identified as PixelizedPSF.')
         
     elif fname.endswith('.fits'):
         img = fits.open(fname)[0].data
         img = img.astype('float32')
-        psfmodel = PixelizedPSF(img)
+        test_psf = PixelizedPSF(img)
         logger.debug(f'PSF model for {band} identified as PixelizedPSF.')
 
     return psfmodel
