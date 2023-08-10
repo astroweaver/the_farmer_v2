@@ -108,7 +108,7 @@ class BaseImage():
         else:
             psfcoords, psflist = self.data[band]['psfmodel'].copy()
 
-        if psfcoords is None: # single psf!
+        if psfcoords is 'none': # single psf!
             if coord is not None:
                 self.logger.warning(f'{band} has only a single PSF! Coordinates ignored.')
             psf_path = psflist

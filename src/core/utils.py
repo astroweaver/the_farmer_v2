@@ -208,7 +208,7 @@ def verify_psfmodel(band):
         psflist = [os.path.join(conf.PATH_PSFMODELS, fname) for fname in psfgrid[cols[2]]]
 
     except: # better be a single file
-        psfcoords = None
+        psfcoords = 'none'
         psflist = os.path.join(conf.PATH_PSFMODELS, psfmodel_path)
 
     psfmodel = (psfcoords, psflist)
