@@ -245,7 +245,7 @@ class Brick(BaseImage):
         group.transfer_maps()
 
         # transfer model catalogs
-        group.transfer_catalogs()
+        # group.transfer_catalogs() #TODO
 
         # Return it
         return group
