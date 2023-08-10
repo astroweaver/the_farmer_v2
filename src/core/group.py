@@ -150,7 +150,10 @@ class Group(BaseImage):
                     if imgtype == 'science':
                         self.wcs[band] = cutout.wcs
                 else:
-                    self.data[band][imgtype] = brick.data[band][imgtype].copy()
+                    if imgtype == 'psfmodel':
+                        self.data[band][imgtype] = brick.data[band][imgtype]
+                    else:
+                        self.data[band][imgtype] = brick.data[band][imgtype].copy()
                     self.logger.debug(f'... data \"{imgtype}\" adopted from brick')
 
             # Clean up

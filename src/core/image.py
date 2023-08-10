@@ -104,9 +104,9 @@ class BaseImage():
         # If you run models on a group, I'll always grab the one nearest to the center of the group
 
         if self.type == 'mosaic':
-            psfcoords, psflist = self.data['psfmodel'].copy()
+            psfcoords, psflist = self.data['psfmodel']
         else:
-            psfcoords, psflist = self.data[band]['psfmodel'].copy()
+            psfcoords, psflist = self.data[band]['psfmodel']
 
         if psfcoords is 'none': # single psf!
             if coord is not None:
@@ -132,20 +132,18 @@ class BaseImage():
 
             except:
                 img = fits.open(psf_path)[0].data
+                img[img<1e-31] = 1e-31
                 img = img.astype('float32')
                 psfmodel = PixelizedPSF(img)
                 self.logger.debug(f'PSF model for {band} identified as PixelizedPSF.')
             
         elif psf_path.endswith('.fits'):
             img = fits.open(psf_path)[0].data
+            img[img<1e-31] = 1e-31
             img = img.astype('float32')
             psfmodel = PixelizedPSF(img)
             self.logger.debug(f'PSF model for {band} identified as PixelizedPSF.')
 
-        # process a bit
-        img = img.astype('float32')
-        psfmodel[psfmodel<1e-31] = 1e-31
-            
         return psfmodel
 
     def set_image(self, image, imgtype=None, band=None):

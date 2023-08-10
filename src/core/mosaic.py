@@ -51,7 +51,7 @@ class Mosaic(BaseImage):
             self.paths = {}
             data_status = bad
             data_provided = []
-            for imgtype in ['science', 'weight', 'mask']:
+            for imgtype in ['science', 'weight', 'mask', 'psfmodel']:
                 if imgtype not in self.properties.keys():
                     self.logger.warning(f'{imgtype} is not configured for {band}!')
                     if imgtype == 'science':
@@ -67,7 +67,6 @@ class Mosaic(BaseImage):
             if band == 'detection':
                 psf_status = '--'
             else:
-                validate_psfmodel(band)
                 psf_status = good
 
             # verify the WCS
@@ -98,8 +97,11 @@ class Mosaic(BaseImage):
             self.n_sources = {}
             self.logger.info(f'Loading {list(self.paths.keys())} for {band}')
             for attr in self.paths.keys():
-                self.data[attr] = fits.getdata(self.paths[attr])
-                self.headers[attr] = fits.getheader(self.paths[attr])
+                if attr == 'psfmodel':
+                    self.data[attr] = validate_psfmodel(band)
+                else:
+                    self.data[attr] = fits.getdata(self.paths[attr])
+                    self.headers[attr] = fits.getheader(self.paths[attr])
                 if attr in ('science', 'weight'):
                     self.estimate_properties(band=band, imgtype=attr)
             if band in conf.BANDS:
