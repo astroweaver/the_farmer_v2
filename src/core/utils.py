@@ -193,8 +193,8 @@ def get_resolution(img, sig=3.):
     fwhm = get_fwhm(img)
     return np.pi * (sig / (2 * 2.5)* fwhm)**2
 
-def verify_psfmodel(band):
-    logger = logging.getLogger('farmer.verify_psfmodel')
+def validate_psfmodel(band):
+    logger = logging.getLogger('farmer.validate_psfmodel')
     psfmodel_path = conf.BANDS[band]['psfmodel']
 
     # maybe it's a table of ra, dec, and path_ending?

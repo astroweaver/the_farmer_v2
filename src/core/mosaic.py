@@ -1,5 +1,5 @@
 import config as conf
-from .utils import verify_psfmodel, dilate_and_group
+from .utils import validate_psfmodel, dilate_and_group
 from .brick import Brick
 from .image import BaseImage
 
@@ -51,7 +51,7 @@ class Mosaic(BaseImage):
             self.paths = {}
             data_status = bad
             data_provided = []
-            for imgtype in ['science', 'weight', 'mask', 'psfmodel']:
+            for imgtype in ['science', 'weight', 'mask']:
                 if imgtype not in self.properties.keys():
                     self.logger.warning(f'{imgtype} is not configured for {band}!')
                     if imgtype == 'science':
@@ -67,9 +67,8 @@ class Mosaic(BaseImage):
             if band == 'detection':
                 psf_status = '--'
             else:
-                self.psfmodel = verify_psfmodel(band)
+                validate_psfmodel(band)
                 psf_status = good
-
 
             # verify the WCS
             wcs_status = bad
@@ -82,8 +81,8 @@ class Mosaic(BaseImage):
 
             arr_shape = self.wcs.array_shape
             self.center = self.wcs.pixel_to_world(arr_shape[0]/2., arr_shape[1]/2.)
-            upper = self.wcs.pixel_to_world(arr_shape[0], arr_shape[1])
-            lower = self.wcs.pixel_to_world(0, 0)
+            # upper = self.wcs.pixel_to_world(arr_shape[0], arr_shape[1])
+            # lower = self.wcs.pixel_to_world(0, 0)
             self.size = arr_shape * self.pixel_scale
             
             self.logger.debug(f'Mosaic {band} is centered at {self.center.ra:2.1f}, {self.center.dec:2.1f}')

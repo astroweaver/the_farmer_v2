@@ -1279,10 +1279,7 @@ class BaseImage():
 
         for band in bands:
             self.logger.debug(f'Plotting PSF for: {band}')    
-            if 'psfmodel' not in self.data[band]:
-                self.logger.warning(f'Cannot find psfmodel for {band}!')
-                continue
-            psfmodel = self.data[band]['psfmodel']
+            psfmodel = self.get_psfmodel(band)
 
             pixscl = (self.pixel_scales[band][0]).to(u.arcsec).value
             fig, ax = plt.subplots(ncols=3, figsize=(30,10))
