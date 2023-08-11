@@ -15,7 +15,7 @@ from tractor.ellipses import EllipseESoft
 
 from tractor.psfex import PixelizedPsfEx, PixelizedPSF #PsfExModel
 # from tractor.psf import HybridPixelizedPSF
-from tractor.galaxy import ExpGalaxy, FracDev
+from tractor.galaxy import ExpGalaxy, FracDev, SoftenedFracDev
 from tractor import PointSource, DevGalaxy, EllipseE, FixedCompositeGalaxy, Fluxes
 from astrometry.util.util import Tan
 from tractor import ConstantFitsWcs
@@ -87,8 +87,8 @@ def read_wcs(wcs, scl=1):
     return wcs
 
 
-def get_brick_position(brick_id):
-    logger = logging.getLogger('farmer.get_brick_position')
+def load_brick_position(brick_id):
+    logger = logging.getLogger('farmer.load_brick_position')
     # Do this relative to the detection image
     wcs = WCS(fits.getheader(conf.DETECTION['science']))
     nx, ny = wcs.array_shape
@@ -161,7 +161,7 @@ def dilate_and_group(catalog, segmap, radius=0, fill_holes=False):
     segid, idx = np.unique(segmap.flatten(), return_index=True)
     group_ids = groupmap.flatten()[idx[segid>0]]
 
-    group_pops = -99 * np.ones(len(catalog), dtype=int)
+    group_pops = -99 * np.ones(len(catalog), dtype=np.int16)
     for i, group_id in enumerate(group_ids):
         group_pops[i] =  np.sum(group_ids == group_id)  # np.unique with indices might be faster.
     
@@ -367,8 +367,11 @@ def recursively_save_dict_contents_to_group(h5file, dic, path='/'):
             #     raise ValueError('The data representation in the HDF5 file does not match the original dict.')
         # save numpy arrays
         elif isinstance(item, (PointSource, SimpleGalaxy, ExpGalaxy, DevGalaxy, FixedCompositeGalaxy)):
+            if key == 'variance': continue
             model_params = dict(zip(item.getParamNames(), item.getParams()))
-            model_params['modeltype'] = item.name
+            model_params['name'] = item.name
+            model_params['variance'] = dict(zip(item.variance.getParamNames(), item.variance.getParams()))
+            model_params['variance']['name'] = item.name
             recursively_save_dict_contents_to_group(h5file, model_params, path + key + '/')
         elif isinstance(item, utils.Cutout2D):
             recursively_save_dict_contents_to_group(h5file, item.__dict__, path + key + '/')
@@ -380,7 +383,7 @@ def recursively_save_dict_contents_to_group(h5file, dic, path='/'):
             h5file[path].attrs[key] = item.tostring()
         elif isinstance(item, np.ndarray):
             if (key == 'bands'): # & np.isscalar(item):
-                item = np.array(item).astype('|S9')
+                item = np.array(item).astype('|S99')
                 try:
                     h5file[path].create_dataset(key, data=item)
                 except:
@@ -393,13 +396,12 @@ def recursively_save_dict_contents_to_group(h5file, dic, path='/'):
             else:
                 try:
                     try:
-                        print(path, key, item)
                         h5file[path].create_dataset(key, data=item)
                     except:
                         h5file[path][key][...] = item
                 except:
                     try:
-                        item = np.array(item).astype('|S9')
+                        item = np.array(item).astype('|S99')
                         h5file[path].create_dataset(key, data=item)
                     except:
                         h5file[path][key][...] = item
@@ -412,12 +414,15 @@ def recursively_save_dict_contents_to_group(h5file, dic, path='/'):
                 item = item.copy(copy_data=False)
                 item.convert_unicode_to_bytestring()
 
-            h5file[path].create_group(key)
-            h5file[path][key].create_dataset('table', data=item.as_array())
-
             header_yaml = meta.get_yaml_from_table(item)
             header_encoded = np.array([h.encode("utf-8") for h in header_yaml])
-            h5file[path][key].create_dataset("table.__table_column_meta__", data=header_encoded)
+            try:
+                h5file[path].create_dataset(key, data=item.as_array())
+                h5file[path].create_dataset(f"{key}.__table_column_meta__", data=header_encoded)
+            except:
+                h5file[path][key][...] = item.as_array()
+                h5file[path][f"{key}.__table_column_meta__"][...] = header_encoded
+
  
         # save dictionaries
         elif isinstance(item, dict):
@@ -454,10 +459,15 @@ def recursively_load_dict_contents_from_group(h5file, path='/', ans=None):
             pass
         logger.debug(f'  ... {item.name} ({type(item)})')
         if isinstance(item, h5py._hl.dataset.Dataset):
+            if '.__table_column_meta__' in item.name:
+                continue
             if item.shape is None:
                 ans[key] = {}
-            elif item[...].dtype == '|S9':
-                ans[key] = item[...].astype(str)
+            elif item[...].dtype == '|S99':
+                if key == 'bands':
+                    ans[key] = item[...].astype(str).tolist()
+                else:
+                    ans[key] = item[...].astype(str)
             elif ('pixel_scales' in item.name) | (key in ('size', 'buffsize')):
                 dx, dy = item[...]
                 ans[key] = (dx*u.deg, dy*u.deg)
@@ -488,32 +498,42 @@ def recursively_load_dict_contents_from_group(h5file, path='/', ans=None):
                 # else:
                 #     ans[key] = item[...]
 
-            elif ('model' in item.name) & ('modeltype' in item.attrs):
-                modeltype = item.attrs['modeltype']
-                pos = RaDecPos(item.attrs['pos.ra'], item.attrs['pos.dec'])
-                fluxes = {}
-                for param in item.attrs:
-                    if param.startswith('brightness'):
-                        fluxes[param.split('.')[-1]] = item.attrs[param]
-                flux = Fluxes(**fluxes)
-    
-                if modeltype == 'PointSource':
-                    model = PointSource(pos, flux)
-                elif modeltype == 'SimpleGalaxy':
-                    model = SimpleGalaxy(pos, flux)
-                elif modeltype == 'ExpGalaxy':
-                    shape = EllipseESoft(item.attrs['shape.logre'], item.attrs['shape.ee1'], item.attrs['shape.ee2'])
-                    model = ExpGalaxy(pos, flux, shape)
-                elif modeltype == 'DevGalaxy':
-                    shape = EllipseESoft(item.attrs['shape.logre'], item.attrs['shape.ee1'], item.attrs['shape.ee2'])
-                    model = DevGalaxy(pos, flux, shape)
-                elif modeltype == 'FixedCompositeGalaxy':
-                    shape_exp = EllipseESoft(item.attrs['shapeExp.logre'], item.attrs['shapeExp.ee1'], item.attrs['shapeExp.ee2'])
-                    shape_dev = EllipseESoft(item.attrs['shapeDev.logre'], item.attrs['shapeDev.ee1'], item.attrs['shapeDev.ee2'])
-                    model = FixedCompositeGalaxy(pos, flux, FracDev(item.attrs['fracDev']), shape_exp, shape_dev)
+            elif 'variance' in item.name:
+                continue
 
-                ans[key] = model
-                
+            elif ('model' in item.name) & ('name' in item.attrs):
+                is_variance = False
+                for item in (item, item['variance']):
+                    name = item.attrs['name']
+                    pos = RaDecPos(item.attrs['pos.ra'], item.attrs['pos.dec'])
+                    fluxes = {}
+                    for param in item.attrs:
+                        if param.startswith('brightness'):
+                            fluxes[param.split('.')[-1]] = item.attrs[param]
+                    flux = Fluxes(**fluxes)
+        
+                    if name == 'PointSource':
+                        model = PointSource(pos, flux)
+                        model.name = name
+                    elif name == 'SimpleGalaxy':
+                        model = SimpleGalaxy(pos, flux)
+                    elif name == 'ExpGalaxy':
+                        shape = EllipseESoft(item.attrs['shape.logre'], item.attrs['shape.ee1'], item.attrs['shape.ee2'])
+                        model = ExpGalaxy(pos, flux, shape)
+                    elif name == 'DevGalaxy':
+                        shape = EllipseESoft(item.attrs['shape.logre'], item.attrs['shape.ee1'], item.attrs['shape.ee2'])
+                        model = DevGalaxy(pos, flux, shape)
+                    elif name == 'FixedCompositeGalaxy':
+                        shape_exp = EllipseESoft(item.attrs['shapeExp.logre'], item.attrs['shapeExp.ee1'], item.attrs['shapeExp.ee2'])
+                        shape_dev = EllipseESoft(item.attrs['shapeDev.logre'], item.attrs['shapeDev.ee1'], item.attrs['shapeDev.ee2'])
+                        model = FixedCompositeGalaxy(pos, flux, SoftenedFracDev(item.attrs['fracDev.SoftenedFracDev']), shape_exp, shape_dev)
+                    
+                    if not is_variance:
+                        ans[key] = model
+                        is_variance = True
+                    else:
+                        ans[key].variance = model
+
             else:
                 ans[key] = recursively_load_dict_contents_from_group(h5file, path + str(key) + '/', ans[key])
                 for key2 in item.attrs:
@@ -550,7 +570,7 @@ def get_params(model):
         name = 'PointSource'
     else:
         name = model.name
-    source['modeltype'] = name
+    source['name'] = name
     source['_bands'] = np.array(list(model.getBrightness().getParamNames()))
 
     # position
@@ -703,7 +723,7 @@ def get_detection_kernel(filter_kernel):
     # if string, grab from config
     if isinstance(filter_kernel, str):
         dirname = os.path.dirname(__file__)
-        filename = os.path.join(dirname, '../../config/conv_filters/'+conf.FILTER_KERNEL)
+        filename = os.path.join(dirname, '../config/conv_filters/'+conf.FILTER_KERNEL)
         if os.path.exists(filename):
             convfilt = np.array(np.array(ascii.read(filename, data_start=1)).tolist())
         else:
@@ -735,3 +755,12 @@ def build_regions(catalog, pixel_scale, outpath='objects.reg', scale_factor=2.0)
     bigreg = Regions(regs)
     bigreg.write(outpath, overwrite=True, format='ds9')
 
+
+def _clear_h5():
+    import gc
+    for obj in gc.get_objects():   # Browse through ALL objects
+        if isinstance(obj, h5py.File):   # Just HDF5 files
+            try:
+                obj.close()
+            except:
+                pass # Was already closed

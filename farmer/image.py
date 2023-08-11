@@ -1,5 +1,5 @@
 import config as conf
-from .utils import clean_catalog, get_fwhm, get_resolution, reproject_discontinuous, SimpleGalaxy, read_wcs, cumulative, set_priors
+from .utils import clean_catalog, get_fwhm, reproject_discontinuous, SimpleGalaxy, read_wcs, cumulative, set_priors
 from .utils import recursively_save_dict_contents_to_group, recursively_load_dict_contents_from_group, dcoord_to_offset, get_params
 from .utils import get_detection_kernel
 
@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 from  matplotlib.colors import LogNorm, SymLogNorm, Normalize, ListedColormap, BoundaryNorm
 from astropy.stats import sigma_clipped_stats
 from astropy.nddata import Cutout2D
-from astropy.io import ascii, fits
+from astropy.io import fits
 from astropy.table import Table, Column
 import astropy.units as u
 from astropy.coordinates import SkyCoord
@@ -28,12 +28,11 @@ from scipy import stats, ndimage
 import matplotlib.backends.backend_pdf
 
 
-from tractor import NCircularGaussianPSF, PixelizedPSF, PixelizedPsfEx, Image, Tractor, FluxesPhotoCal, NullWCS, ConstantSky, EllipseE, EllipseESoft, Fluxes, PixPos, Catalog
+from tractor import PixelizedPSF, PixelizedPsfEx, Image, Tractor, FluxesPhotoCal, ConstantSky, EllipseESoft, Fluxes, Catalog
 from tractor.sersic import SersicIndex, SersicGalaxy
 from tractor.sercore import SersicCoreGalaxy
 from tractor.galaxy import ExpGalaxy, DevGalaxy, FixedCompositeGalaxy, SoftenedFracDev
 from tractor.pointsource import PointSource
-from tractor.psf import HybridPixelizedPSF
 from tractor.constrained_optimizer import ConstrainedOptimizer
 
 
@@ -120,8 +119,6 @@ class BaseImage():
                 coord = self.position
             
             # find nearest to coord
-            print(coord)
-            print(psfcoords)
             psf_idx, d2d, __ = coord.match_to_catalog_sky(psfcoords, 1)
             self.logger.info(f'Found the nearest PSF for {band} {d2d.to(u.arcmin)} away.')
             psf_path = psflist[psf_idx]
@@ -222,8 +219,8 @@ class BaseImage():
         # Deal with background
         if background is None:
             background = 0
-        else:
-            assert np.shape(background)==np.shape(image), f'Background ({np.shape(background)}) does not have the same shape as image ({np.shape(image)}!'
+        elif ~np.isscalar(background):
+            assert np.shape(background)==np.shape(image), f'Background {np.shape(background)} does not have the same shape as image {np.shape(image)}!'
 
         # Grab the convolution filter
         convfilt = None
@@ -491,8 +488,8 @@ class BaseImage():
         for i, source_id in enumerate(self.source_ids):
             model, variance = cat[i], cat_variance[i]
             # To store stuff like chi2, bic, residual stats, group chi2
+            model.variance = variance
             self.model_tracker[source_id][self.stage]['model'] = model
-            self.model_tracker[source_id][self.stage]['variance'] = variance
 
             self.logger.debug(f'Source #{source_id}: {model.name} model at {model.pos}')
             self.logger.debug(f'               {model.brightness}') 
@@ -1114,10 +1111,7 @@ class BaseImage():
                         continue
 
                 fig = plt.figure(figsize=(20,20))
-                print(band, imgtype, self.get_wcs(band))
-                print(fig)
                 ax = fig.add_subplot(projection=self.get_wcs(band))
-                print(ax)
                 ax.set_title(f'{band} {imgtype} {tag}')
 
 
@@ -1808,7 +1802,7 @@ class BaseImage():
             self.write_hdf5(allow_update=allow_update, filename=filename)
             self.write_fits(allow_update=allow_update, filename=filename.replace('.h5', '.fits'))
             if bool(self.catalogs):
-                if np.sum([bool(self.catalogs[key]) for key in self.catalogs]) > 1:
+                if np.sum([bool(self.catalogs[key]) for key in self.catalogs]) >= 1:
                     self.write_catalog(allow_update=allow_update, filename=filename.replace('.h5', '.cat'))
         elif filetype == 'hdf5':
             self.write_hdf5(allow_update=allow_update, filename=filename)
@@ -1816,7 +1810,7 @@ class BaseImage():
             self.write_fits(allow_update=allow_update, filename=filename.replace('.h5', '.fits'))
         elif filetype == 'cat':
             if bool(self.catalogs):
-                if np.sum([bool(self.catalogs[key]) for key in self.catalogs]) > 1:
+                if np.sum([bool(self.catalogs[key]) for key in self.catalogs]) >= 1:
                     self.write_catalog(allow_update=allow_update, filename=filename.replace('.h5', '.cat'))
                 else:
                     raise RuntimeError('Cannot write catalogs to disk as none are present!')
@@ -1920,15 +1914,6 @@ class BaseImage():
         attr = recursively_load_dict_contents_from_group(hf)
         hf.close()
         return attr
-    
-    def _clear_h5():
-        import gc
-        for obj in gc.get_objects():   # Browse through ALL objects
-            if isinstance(obj, h5py.File):   # Just HDF5 files
-                try:
-                    obj.close()
-                except:
-                    pass # Was already closed
 
     def write_catalog(self, bands=None, catalog_imgtype=None, catalog_band=None, allow_update=False, filename=None, directory=conf.PATH_CATALOGS, overwrite=False):
 

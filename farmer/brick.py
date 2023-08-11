@@ -1,7 +1,7 @@
 from collections import OrderedDict
 import config as conf
 from .image import BaseImage
-from .utils import get_brick_position, dilate_and_group, clean_catalog, build_regions
+from .utils import load_brick_position, dilate_and_group, clean_catalog, build_regions
 from .group import Group
 
 import logging
@@ -60,7 +60,7 @@ class Brick(BaseImage):
             if (brick_id is not None) & ((position is not None) | (size is not None)):
                 raise RuntimeError('Cannot create brick from BOTH brick_id AND position/size!')
             if brick_id is not None:
-                self.position, self.size = get_brick_position(brick_id)
+                self.position, self.size = load_brick_position(brick_id)
             else:
                 self.position, self.size = position, size
             self.buffsize = (self.size[0]+2*conf.BRICK_BUFFER, self.size[1]+2*conf.BRICK_BUFFER)
@@ -84,6 +84,7 @@ class Brick(BaseImage):
         for band in self.bands:
             print(f' --- Data {band} ---')
             for imgtype in self.data[band].keys():
+                if imgtype == 'psfmodel': continue
                 img = self.data[band][imgtype].data
                 tsum, mean, med, std = np.nansum(img), np.nanmean(img), np.nanmedian(img), np.nanstd(img)
                 print(f'  {imgtype} ... {np.shape(img)} ( {tsum:2.2f} / {mean:2.2f} / {med:2.2f} / {std:2.2f})')
@@ -222,7 +223,7 @@ class Brick(BaseImage):
         self.catalogs[band][imgtype].add_column(group_pops, name='group_pop', index=3)
         self.data[band]['groupmap'] = Cutout2D(groupmap, self.position, self.buffsize[::-1], self.wcs[band], mode='partial', fill_value = 0)
         self.group_ids[band][imgtype] = np.unique(group_ids)
-        self.group_pops[band][imgtype] = dict(zip(group_ids, group_pops))
+        # self.group_pops[band][imgtype] = dict(zip(group_ids, group_pops))
         self.headers[band]['groupmap'] = self.headers[band]['science']
 
     def spawn_group(self, group_id=None, imgtype='science', bands=None):
@@ -235,17 +236,23 @@ class Brick(BaseImage):
         
         nsrcs = group.n_sources['detection'][imgtype]
         source_ids = np.array(group.get_catalog()['ID'])
+        group.source_ids = source_ids
         self.logger.debug(f'Group #{group_id} has {nsrcs} source: {source_ids}')
         if nsrcs > conf.GROUP_SIZE_LIMIT:
             self.logger.warning(f'Group #{group_id} has {nsrcs} sources, but the limit is set to {conf.GROUP_SIZE_LIMIT}!')
             group.rejected = True
             return group
+        
+        # Loop over model catalog
+        for source_id, model in self.model_catalog.items():
+            group.model_catalog[source_id] = model
+            
+            group.model_tracker[source_id] = {}
+            for stage, stats in self.model_tracker[source_id].items():
+                group.model_tracker[source_id][stage] = stats
 
         # transfer maps
         group.transfer_maps()
-
-        # transfer model catalogs
-        # group.transfer_catalogs() #TODO
 
         # Return it
         return group

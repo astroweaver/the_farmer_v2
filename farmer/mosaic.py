@@ -20,6 +20,9 @@ default_properties['zeropoint'] = -99
 class Mosaic(BaseImage):
     def __init__(self, band, load=False) -> None:
 
+        if '.' in band:
+            raise ValueError(f'Band name {band} cannot contain a "."! Rename without one please.')
+
         # Housekeeping
         self.band = band
         self.is_loaded = load

@@ -1,6 +1,6 @@
 import config as conf
 from .image import BaseImage
-from .utils import get_brick_position
+from .utils import load_brick_position
 
 import logging
 import os
@@ -95,6 +95,8 @@ class Group(BaseImage):
             print()
             print(f' --- Data {band} ---')
             for imgtype in self.data[band].keys():
+                if imgtype == 'psfmodel':
+                    continue
                 img = np.copy(self.data[band][imgtype].data)
                 if imgtype == 'weight':
                     img = img[img>0]
@@ -126,8 +128,6 @@ class Group(BaseImage):
                 self.properties[band][attr] = brick.properties[band][attr]
                 self.logger.debug(f'... property \"{attr}\" adopted from brick')
 
-            # TODO: handle variable PSFs here!
-
             # Loop over provided data
             for imgtype in brick.data[band].keys():
                 if imgtype in ('science', 'weight', 'mask', 'background', 'segmap', 'groupmap', 'back', 'rms', 'model', 'residual', 'chi'):
@@ -140,8 +140,6 @@ class Group(BaseImage):
                     self.data[band][imgtype] = cutout
                     if imgtype in ('science', 'weight', 'mask'):
                         self.headers[band][imgtype] = brick.headers[band][imgtype] #TODO update WCS!
-
-
                     if imgtype in brick.catalogs[band].keys():
                         catalog = brick.catalogs[band][imgtype]
                         self.catalogs[band][imgtype] = catalog[catalog['group_id'] == self.group_id]

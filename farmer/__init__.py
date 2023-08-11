@@ -150,7 +150,7 @@ def build_bricks(brick_ids=None, include_detection=True, bands=None, write=False
             del mosaic
         return
 
-def get_brick(brick_id):
+def load_brick(brick_id):
     return Brick(brick_id, load=True)
 
 def update_bricks(brick_ids=None, bands=None):
@@ -168,7 +168,7 @@ def update_bricks(brick_ids=None, bands=None):
     # Update bricks where needed
     
     if np.isscalar(brick_ids): # single brick built in memory and saved
-        brick = get_brick(brick_ids)
+        brick = load_brick(brick_ids)
         for band in bands:
             if band not in brick.bands:
                 logger.warning(f'{band} not found in brick #{brick_ids}! Updating...')
@@ -188,7 +188,7 @@ def update_bricks(brick_ids=None, bands=None):
                 arr = tqdm(brick_ids)
             logger.info('Spawning or updating bricks...')
             for brick_id in arr:
-                brick = get_brick(brick_id)
+                brick = load_brick(brick_id)
                 for band in bands:
                     if band not in brick.bands:
                         logger.warning(f'{band} not found in brick #{brick_id}! Updating...')
@@ -227,7 +227,7 @@ def detect_sources(brick_ids=None, band='detection', imgtype='science', brick=No
             
             # does the brick exist? load it.
             try:
-                brick = get_brick(brick_id)
+                brick = load_brick(brick_id)
             except:
                 brick = build_bricks(brick_id,  bands='detection')
 
@@ -254,7 +254,7 @@ def generate_models(brick_ids=None, group_ids=None, bands=conf.MODEL_BANDS, imgt
     for brick_id in brick_ids:
         # does the brick exist? load it.
         try:
-            brick = get_brick(brick_id)
+            brick = load_brick(brick_id)
         except:
             brick = build_bricks(brick_id,  bands=bands)
 
@@ -296,7 +296,7 @@ def photometer(brick_ids=None, group_ids=None, bands=None, imgtype='science'):
     for brick_id in brick_ids:
         # does the brick exist? load it.
         try:
-            brick = get_brick(brick_id)
+            brick = load_brick(brick_id)
             update_bricks(brick_id, bands)
         except:
             brick = build_bricks(brick_id)
@@ -327,7 +327,7 @@ def photometer(brick_ids=None, group_ids=None, bands=None, imgtype='science'):
 def quick_group(brick_id=1, group_id=524, brick=None):
     if not ((brick is not None) & isinstance(brick, Brick)):
         try:
-            brick = get_brick(brick_id)
+            brick = load_brick(brick_id)
         except:
             brick = build_bricks(brick_id)
     brick.detect_sources()
