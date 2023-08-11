@@ -108,7 +108,7 @@ class BaseImage():
         else:
             psfcoords, psflist = self.data[band]['psfmodel']
 
-        if psfcoords is 'none': # single psf!
+        if psfcoords == 'none': # single psf!
             if coord is not None:
                 self.logger.warning(f'{band} has only a single PSF! Coordinates ignored.')
             psf_path = psflist
@@ -116,10 +116,12 @@ class BaseImage():
         else:
             if coord is None:
                 if self.type != 'group':
-                    self.logger.warning(f'{band} has mutliple PSFs but no coordinates supplied. Picking the nearest.')
-                coord = self.center
+                    self.logger.debug(f'{band} has mutliple PSFs but no coordinates supplied. Picking the nearest.')
+                coord = self.position
             
             # find nearest to coord
+            print(coord)
+            print(psfcoords)
             psf_idx, d2d, __ = coord.match_to_catalog_sky(psfcoords, 1)
             self.logger.info(f'Found the nearest PSF for {band} {d2d.to(u.arcmin)} away.')
             psf_path = psflist[psf_idx]
@@ -221,7 +223,7 @@ class BaseImage():
         if background is None:
             background = 0
         else:
-            assert(np.shape(background)==np.shape(image), f'Background ({np.shape(background)}) does not have the same shape as image ({np.shape(image)}!')
+            assert np.shape(background)==np.shape(image), f'Background ({np.shape(background)}) does not have the same shape as image ({np.shape(image)}!'
 
         # Grab the convolution filter
         convfilt = None
@@ -1160,7 +1162,7 @@ class BaseImage():
 
                             # use groupmap from brick to get position and buffsize
                             group_npix = np.sum(groupmap==group_id) #TODO -- save this somewhere
-                            assert(group_npix > 0, f'No pixels belong to group #{group_id}!')
+                            assert group_npix > 0, f'No pixels belong to group #{group_id}!'
                             try:
                                 idy, idx = np.array(groupmap==group_id).nonzero()
                             except:
@@ -1895,7 +1897,7 @@ class BaseImage():
                 hf = h5py.File(path, 'r+')
         else:
             # make new files
-            hf = h5py.File(path, 'w-')
+            hf = h5py.File(path, 'a')
 
         self.logger.debug(f'... adding attributes to hdf5')
         recursively_save_dict_contents_to_group(hf, self.__dict__)
@@ -1918,6 +1920,15 @@ class BaseImage():
         attr = recursively_load_dict_contents_from_group(hf)
         hf.close()
         return attr
+    
+    def _clear_h5():
+        import gc
+        for obj in gc.get_objects():   # Browse through ALL objects
+            if isinstance(obj, h5py.File):   # Just HDF5 files
+                try:
+                    obj.close()
+                except:
+                    pass # Was already closed
 
     def write_catalog(self, bands=None, catalog_imgtype=None, catalog_band=None, allow_update=False, filename=None, directory=conf.PATH_CATALOGS, overwrite=False):
 

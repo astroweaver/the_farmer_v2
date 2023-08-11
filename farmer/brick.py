@@ -308,7 +308,7 @@ class Brick(BaseImage):
     def absorb(self, group): # eventually allow mosaic to do this too! absorb bricks + make a huge model catalog!
 
         # check ownership
-        assert(self.brick_id == group.brick_id, 'Group does not belong to this brick!')
+        assert self.brick_id == group.brick_id, 'Group does not belong to this brick!'
 
         # # rebuild maps NOTE don't do this with cutouts. Realize it for the brick itself.
         # for band in self.data:

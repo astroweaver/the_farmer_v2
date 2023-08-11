@@ -1,3 +1,8 @@
+import sys
+from pathlib import Path
+
+from .version import __version__
+
 # General imports
 import os
 import sys
@@ -52,8 +57,8 @@ T H E
 --------------------------------------------------------------------
  M O D E L   P H O T O M E T R Y   W I T H   T H E   T R A C T O R   
 --------------------------------------------------------------------
-    Version 2.0                               
-    (C) 2018-2022 -- J. Weaver (DAWN, University of Copenhagen)          
+    Version {__version__}                               
+    (C) 2018-2023 -- J. Weaver (DAWN, UMASS)          
 ====================================================================
 
 CONSOLE_LOGGING_LEVEL ..... {conf.CONSOLE_LOGGING_LEVEL}			
@@ -69,6 +74,11 @@ from .utils import start_logger
 logger = start_logger()
 
 print('You should start by running farmer.validate()!')
+
+# General imports
+import numpy as np
+from tqdm import tqdm
+
 
 # Look at mosaics and check they exist
 def validate():
@@ -249,7 +259,7 @@ def generate_models(brick_ids=None, group_ids=None, bands=conf.MODEL_BANDS, imgt
             brick = build_bricks(brick_id,  bands=bands)
 
         # check that detection exists
-        assert('detection' in brick.bands, f'No detection information contained in brick #{brick.brick_id}!')
+        assert 'detection' in brick.bands, f'No detection information contained in brick #{brick.brick_id}!'
 
         #TODO make sure background is dealt with
 

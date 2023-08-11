@@ -79,15 +79,15 @@ class Mosaic(BaseImage):
                 raise RuntimeError(f'The World Coordinate System for {band} cannot be understood!')
 
             arr_shape = self.wcs.array_shape
-            self.center = self.wcs.pixel_to_world(arr_shape[0]/2., arr_shape[1]/2.)
+            self.position = self.wcs.pixel_to_world(arr_shape[0]/2., arr_shape[1]/2.)
             # upper = self.wcs.pixel_to_world(arr_shape[0], arr_shape[1])
             # lower = self.wcs.pixel_to_world(0, 0)
             self.size = arr_shape * self.pixel_scale
             
-            self.logger.debug(f'Mosaic {band} is centered at {self.center.ra:2.1f}, {self.center.dec:2.1f}')
+            self.logger.debug(f'Mosaic {band} is centered at {self.position.ra:2.1f}, {self.position.dec:2.1f}')
             self.logger.debug(f'Mosaic {band} has size at {self.size[0]:2.1f}, {self.size[1]:2.1f}')
 
-            self.logger.info(f'{band:10}: {data_status} Data {tuple(data_provided)} {psf_status} PSF {wcs_status} WCS ({self.center.ra:2.1f}, {self.center.dec:2.1f})')
+            self.logger.info(f'{band:10}: {data_status} Data {tuple(data_provided)} {psf_status} PSF {wcs_status} WCS ({self.position.ra:2.1f}, {self.position.dec:2.1f})')
 
         # Now load in the data (memory use!) -- and only what is necessary!
         if load:

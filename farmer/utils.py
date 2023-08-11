@@ -25,6 +25,7 @@ from collections import OrderedDict
 from reproject import reproject_interp
 from tqdm import tqdm
 import h5py
+from astropy.table import meta
 from tractor.wcs import RaDecPos
 
 
@@ -110,7 +111,7 @@ def get_brick_position(brick_id):
 def clean_catalog(catalog, mask, segmap=None):
     logger = logging.getLogger('farmer.clean_catalog')
     if segmap is not None:
-        assert(mask.shape == segmap.shape, f'Mask {mask.shape} is not the same shape as the segmentation map {segmap.shape}!')
+        assert mask.shape == segmap.shape, f'Mask {mask.shape} is not the same shape as the segmentation map {segmap.shape}!'
     zero_seg = np.sum(segmap==0)
     logger.debug('Cleaning catalog...')
     tstart = time.time()
@@ -196,6 +197,9 @@ def get_resolution(img, sig=3.):
 def validate_psfmodel(band):
     logger = logging.getLogger('farmer.validate_psfmodel')
     psfmodel_path = conf.BANDS[band]['psfmodel']
+
+    if not os.path.exists(psfmodel_path):
+        raise RuntimeError(f'PSF path for {band} does not exist!\n({psfmodel_path})')
 
     # maybe it's a table of ra, dec, and path_ending?
     try:
@@ -401,11 +405,20 @@ def recursively_save_dict_contents_to_group(h5file, dic, path='/'):
                         h5file[path][key][...] = item
 
         elif isinstance(item, Table):
-            item.write(h5file.filename, path=path+key, append=True, overwrite=True)
-            # h5file[path].create_group(key)
-            # h5file[path][key].create_dataset('table', data=item.as_array())
-            # for unit, colname in zip(item.info['unit'], item.info['name']):
-            #     h5file[path][key].attrs[colname] = unit
+            # item.write(h5file.filename, path=path+key, append=True, overwrite=True)
+            # NOTE: Default astropy.table handler MAKES a new file... we already have one open!
+            # I've copied the key parts from astropy's source code here. Could use testing.
+            if any(col.info.dtype.kind == "U" for col in item.itercols()):
+                item = item.copy(copy_data=False)
+                item.convert_unicode_to_bytestring()
+
+            h5file[path].create_group(key)
+            h5file[path][key].create_dataset('table', data=item.as_array())
+
+            header_yaml = meta.get_yaml_from_table(item)
+            header_encoded = np.array([h.encode("utf-8") for h in header_yaml])
+            h5file[path][key].create_dataset("table.__table_column_meta__", data=header_encoded)
+ 
         # save dictionaries
         elif isinstance(item, dict):
             if len(item.keys()) == 0:
