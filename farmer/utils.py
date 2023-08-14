@@ -17,8 +17,11 @@ from tractor.psfex import PixelizedPsfEx, PixelizedPSF #PsfExModel
 # from tractor.psf import HybridPixelizedPSF
 from tractor.galaxy import ExpGalaxy, FracDev, SoftenedFracDev
 from tractor import PointSource, DevGalaxy, EllipseE, FixedCompositeGalaxy, Fluxes
-from astrometry.util.util import Tan
+# from astrometry.util.util import Tan
 from tractor import ConstantFitsWcs
+
+class Tan():
+    pass
 
 import time
 from collections import OrderedDict
@@ -416,12 +419,11 @@ def recursively_save_dict_contents_to_group(h5file, dic, path='/'):
 
             header_yaml = meta.get_yaml_from_table(item)
             header_encoded = np.array([h.encode("utf-8") for h in header_yaml])
-            try:
-                h5file[path].create_dataset(key, data=item.as_array())
-                h5file[path].create_dataset(f"{key}.__table_column_meta__", data=header_encoded)
-            except:
-                h5file[path][key][...] = item.as_array()
-                h5file[path][f"{key}.__table_column_meta__"][...] = header_encoded
+            if key in h5file[path]:
+                del h5file[path][key]
+                del h5file[path][f"{key}.__table_column_meta__"]
+            h5file[path].create_dataset(key, data=item.as_array())
+            h5file[path].create_dataset(f"{key}.__table_column_meta__", data=header_encoded)
 
  
         # save dictionaries

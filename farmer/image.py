@@ -536,6 +536,7 @@ class BaseImage():
 
         self.add_tracker(init_stage=10)
         self.stage_images(bands=bands)
+        self.stage_models(bands=bands)
         self.measure_stats(bands=bands, stage=self.stage)
         if conf.PLOT > 2:
             self.plot_image(tag=f's{self.stage}', band=bands, show_catalog=True, imgtype=('science', 'model', 'residual', 'chi'))
@@ -567,6 +568,7 @@ class BaseImage():
         # stage 0
         self.add_tracker()
         self.stage_images(bands=bands)
+        self.stage_models(bands=bands)
         self.measure_stats(bands=bands, stage=self.stage)
         if conf.PLOT > 2:
             self.plot_image(tag=f's{self.stage}', band=bands, show_catalog=True, imgtype=('science', 'model', 'residual', 'chi'))
@@ -844,7 +846,7 @@ class BaseImage():
             self.model_tracker[self.type][stage]['total']['rchisq'] = chi2 / ndof
             chi_pc = np.nanpercentile(totchi, q=q_pc)
             for pc, chi_npc in zip(q_pc, chi_pc):
-                self.model_tracker[self.type][stage][f'chi_pc{pc}'] = chi_npc
+                self.model_tracker[self.type][stage]['total'][f'chi_pc{pc}'] = chi_npc
             if len(totchi) >= 8:
                 self.model_tracker[self.type][stage]['total']['chi_k2'] = stats.normaltest(totchi)[0]
             else:
@@ -973,7 +975,7 @@ class BaseImage():
                 self.transfer_maps(band)
 
         self.stage_images(bands=bands) # assumes a single PSF!
-        self.stage_models(bands=bands)
+        # self.stage_models(bands=bands)
         self.engine = Tractor(list(self.images.values()), list(self.model_catalog.values()))
         self.engine.bands = list(self.images.keys())
 
@@ -1003,7 +1005,8 @@ class BaseImage():
                 model = Tractor([self.images[band],], Catalog(*srcs)).getModelImage(0)
             else:
                 model = self.engine.getModelImage(self.images[band])
-                self.set_image(model, 'model', band)
+            
+            self.set_image(model, 'model', band)
 
             self.logger.debug(f'Built model image for {band}')
             if len(bands) == 1:
@@ -1131,7 +1134,7 @@ class BaseImage():
                     options = dict(cmap='Greys', norm=norm)
                     im = ax.imshow(image - background, **options)
                     fig.colorbar(im, orientation="horizontal", pad=0.2)
-                    pixscl = self.pixel_scales[band][0].to(u.deg).value, self.pixel_scales[band][0].to(u.deg).value
+                    pixscl = self.pixel_scales[band][0].to(u.deg).value, self.pixel_scales[band][1].to(u.deg).value
                     if self.type == 'brick':
                         brick_buffer_pix = conf.BRICK_BUFFER.to(u.deg).value / pixscl[0], conf.BRICK_BUFFER.to(u.deg).value / pixscl[1]
                         ax.add_patch(Rectangle(brick_buffer_pix, self.size[0].to(u.deg).value / pixscl[0], self.size[1].to(u.deg).value / pixscl[1],
@@ -1151,7 +1154,12 @@ class BaseImage():
 
                     # show group extents
                     if show_groups:
-                        groupmap = self.get_image(band=catalog_band, imgtype='groupmap')
+                        try:
+                            groupmap = self.get_image(band=band, imgtype='groupmap')
+                        except:
+                            self.transfer_maps(bands=band)
+                            groupmap = self.get_image(band=band, imgtype='groupmap')
+
                         for group_id in tqdm(self.group_ids[catalog_band][catalog_imgtype]):
 
                             # use groupmap from brick to get position and buffsize
@@ -1240,6 +1248,8 @@ class BaseImage():
                     fig.tight_layout()
             
                 if imgtype in ('segmap', 'groupmap'):
+                    if np.sum(image!=0) == 0:
+                        continue
                     options = dict(cmap='prism', vmin=np.min(image[image!=0]), vmax=np.max(image))
                     image = image.copy().astype('float')
                     image[image==0] = np.nan
@@ -1303,9 +1313,8 @@ class BaseImage():
             fig.savefig(figname, overwrite=overwrite)
             plt.close(fig)
 
-    def plot_summary(self, source_id=None, bands=None, stage=None, tag=None, catalog_band='detection', catalog_imgtype='science', overwrite=True):
+    def plot_summary(self, source_id=None, group_id=None, bands=None, stage=None, tag=None, catalog_band='detection', catalog_imgtype='science', overwrite=True):
         # show the group or source image, model, residuals, background, psf, distributions + statistics
-        
 
         if bands is None:
             bands = self.get_bands()
@@ -1320,12 +1329,17 @@ class BaseImage():
         catalog = self.get_catalog(catalog_band, catalog_imgtype)
 
         if source_id is None:
-            sources = list(self.model_tracker.keys())
+            if group_id is None:
+                sources = list(self.model_tracker.keys())
+            else:
+                sources = [x for x in self.model_tracker.keys() if x in catalog['source_id'][catalog['group_id']==group_id]]
         else:
             if np.isscalar(source_id):
                 sources = [source_id,]
             else:
                 sources = source_id
+
+        self.build_all_images()
 
         for source_id in sources:
             fnsrc = ''
@@ -1403,7 +1417,7 @@ class BaseImage():
                 cmap = plt.get_cmap('rainbow', len(source_ids))
                 pixscl = self.pixel_scales[band]
                 histbins = np.linspace(-3, 3, 20)
-                hwhm = get_fwhm(self.get_psfmodel(band=band).data) / 2. * pixscl[0].to(u.arcsec).value
+                hwhm = get_fwhm(self.get_psfmodel(band=band).img) / 2. * pixscl[0].to(u.arcsec).value
                 
                 cutout = self.data[band]['science']
                 upper = self.wcs[band].pixel_to_world(cutout.shape[1], cutout.shape[0])
@@ -1553,7 +1567,7 @@ class BaseImage():
                 py = img[:,peakx]
                 wgt = self.get_image('weight', band=band).copy()   #[src]
                 epy = np.where(wgt<=0, 0, 1/np.sqrt(wgt))[:,peakx]
-                max1 = np.max(py + 3*epy)
+                max1 = np.nanmax(py + 3*epy)
                 axes[3,1].errorbar(px[epy>0], py[epy>0], yerr=epy[epy>0], c='k', capsize=0, marker='.', ls='')
                 axes[3,1].errorbar(px[epy==0], py[epy==0], yerr=epy[epy==0], mfc='none', mec='k', capsize=0, marker='.', ls='')
                 axes[3,1].axvline(0, ls='dashed', c='grey')
@@ -1566,7 +1580,7 @@ class BaseImage():
                 py = img[peaky]
                 wgt = self.get_image('weight', band=band).copy()   #[src]
                 epy = np.where(wgt<=0, 0, 1/np.sqrt(wgt))[peaky]
-                max2 = np.max(py + 3*epy)
+                max2 = np.nanmax(py + 3*epy)
                 axes[3,2].errorbar(px[epy>0], py[epy>0], yerr=epy[epy>0], c='k', capsize=0, marker='.', ls='')
                 axes[3,2].errorbar(px[epy==0], py[epy==0], yerr=epy[epy==0], mfc='none', mec='k', capsize=0, marker='.', ls='')
                 axes[3,2].axvline(0, ls='dashed', c='grey')
@@ -1594,7 +1608,7 @@ class BaseImage():
                 # axes[3,2].plot(px, py, color='g')
 
                 nx, ny = np.shape(img)
-                psf = self.get_psfmodel(band).data
+                psf = self.get_psfmodel(band).img
                 scl = 1
                 zoomed_psf = ndimage.zoom(psf, scl)
                 zoomed_psf /= np.sum(zoomed_psf)
@@ -1732,7 +1746,7 @@ class BaseImage():
                 axes[2,3].text(target_center, 0.12, f'{target_scale}\"', transform=axes[2,3].transAxes, fontweight='bold', horizontalalignment='center')
 
                 # PSF
-                psfmodel = self.data[band]['psfmodel']
+                psfmodel = self.get_psfmodel(band=band).img
                 pixscl = (self.pixel_scales[band][0]).to(u.arcsec).value
                 xax = np.arange(-np.shape(psfmodel)[0]/2 + 0.5,  np.shape(psfmodel)[0]/2+0.5)
                 [axes[3,0].plot(xax * pixscl, psfmodel[x], c='royalblue', alpha=0.5) for x in np.arange(0, np.shape(psfmodel)[1])]

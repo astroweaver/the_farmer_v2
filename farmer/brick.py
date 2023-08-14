@@ -243,6 +243,8 @@ class Brick(BaseImage):
             group.rejected = True
             return group
         
+        group.priors = self.priors
+        
         # Loop over model catalog
         for source_id, model in self.model_catalog.items():
             group.model_catalog[source_id] = model
@@ -250,6 +252,11 @@ class Brick(BaseImage):
             group.model_tracker[source_id] = {}
             for stage, stats in self.model_tracker[source_id].items():
                 group.model_tracker[source_id][stage] = stats
+
+        group.model_tracker['group'] = {}
+        if group_id in self.model_tracker_groups:
+            for stage, stats in self.model_tracker_groups[group_id].items():
+                group.model_tracker['group'][stage] = stats
 
         # transfer maps
         group.transfer_maps()
