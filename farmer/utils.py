@@ -17,11 +17,8 @@ from tractor.psfex import PixelizedPsfEx, PixelizedPSF #PsfExModel
 # from tractor.psf import HybridPixelizedPSF
 from tractor.galaxy import ExpGalaxy, FracDev, SoftenedFracDev
 from tractor import PointSource, DevGalaxy, EllipseE, FixedCompositeGalaxy, Fluxes
-# from astrometry.util.util import Tan
+from astrometry.util.util import Tan
 from tractor import ConstantFitsWcs
-
-class Tan():
-    pass
 
 import time
 from collections import OrderedDict
