@@ -587,6 +587,10 @@ def get_params(model):
     if model.name == 'SimpleGalaxy': # this is stupid for stupid reasons.
         pass
     elif isinstance(model, (ExpGalaxy, DevGalaxy)):
+        if isinstance(model, ExpGalaxy):
+            skind = '_exp'
+        elif isinstance(model, DevGalaxy):
+            skind = '_dev'
         source['logre'] = model.shape.logre # log(arcsec)
         source['logre.err'] = np.sqrt(model.variance.shape.logre)
         source['ellip'] = model.shape.e
