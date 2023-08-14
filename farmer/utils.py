@@ -589,10 +589,9 @@ def get_params(model):
     elif isinstance(model, (ExpGalaxy, DevGalaxy)):
         if isinstance(model, ExpGalaxy):
             skind = '_exp'
-            variance_shape = model.variance.shapeExp
         elif isinstance(model, DevGalaxy):
             skind = '_dev'
-            variance_shape = model.variance.shapeDev
+        variance_shape = model.variance.shape
         source['logre'] = model.shape.logre # log(arcsec)
         source['logre.err'] = np.sqrt(model.variance.shape.logre)
         source['ellip'] = model.shape.e
