@@ -589,8 +589,10 @@ def get_params(model):
     elif isinstance(model, (ExpGalaxy, DevGalaxy)):
         if isinstance(model, ExpGalaxy):
             skind = '_exp'
+            variance_shape = model.variance.shapeExp
         elif isinstance(model, DevGalaxy):
             skind = '_dev'
+            variance_shape = model.variance.shapeDev
         source['logre'] = model.shape.logre # log(arcsec)
         source['logre.err'] = np.sqrt(model.variance.shape.logre)
         source['ellip'] = model.shape.e
@@ -604,10 +606,10 @@ def get_params(model):
         source['theta.err'] = np.sqrt(np.rad2deg(model.variance.shape.theta)) * u.deg
 
         source[f'reff{skind}'] = np.exp(model.shape.logre) * u.arcsec # in arcsec
-        source[f'reff{skind}.err'] = np.sqrt(model.variance_shape.logre) * source[f'reff{skind}'] * np.log(10)
+        source[f'reff{skind}.err'] = np.sqrt(variance_shape.logre) * source[f'reff{skind}'] * np.log(10)
 
         boa = (1. - np.abs(model.shape.e)) / (1. + np.abs(model.shape.e))
-        boa_sig = boa * np.sqrt(model.variance_shape.e) * np.sqrt((1/(1.-model.shape.e))**2 + (1/(1.+model.shape.e))**2)
+        boa_sig = boa * np.sqrt(variance_shape.e) * np.sqrt((1/(1.-model.shape.e))**2 + (1/(1.+model.shape.e))**2)
         source[f'ba{skind}'] = boa
         source[f'ba{skind}.err'] = boa_sig
         
